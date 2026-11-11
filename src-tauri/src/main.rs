@@ -1,5 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+//! 装配层 only（工程规范 §1）：plugin/路由注册与启动顺序，不放逻辑。
+
+mod cloud;
+mod db;
+mod debounce;
+mod event_bus;
+mod event_collector;
+mod hooks;
+mod ipc;
+mod llm;
+mod perception;
+mod settings;
+mod voice;
+
 use tauri::Manager;
 
 fn main() {
@@ -17,28 +31,11 @@ fn main() {
             let _ = win.set_ignore_cursor_events(true);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![set_click_through, get_cursor_position, debug_log])
+        .invoke_handler(tauri::generate_handler![
+            ipc::set_click_through,
+            ipc::get_cursor_position,
+            ipc::debug_log
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[tauri::command]
-fn set_click_through(through: bool, window: tauri::Window) {
-    let _ = window.set_ignore_cursor_events(through);
-}
-
-// M0-2：点击穿透下页面收不到鼠标事件，由 Rust 侧轮询全局光标位置
-#[tauri::command]
-fn get_cursor_position(app: tauri::AppHandle) -> Option<(f64, f64)> {
-    app.cursor_position().ok().map(|p| (p.x, p.y))
-}
-
-// 临时调试：前端状态写文件（截图不可靠时排查用）
-#[tauri::command]
-fn debug_log(msg: String) {
-    use std::io::Write;
-    let path = std::env::temp_dir().join("chaojiandai-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{}", msg);
-    }
 }

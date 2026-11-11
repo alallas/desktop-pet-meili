@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>潮间带</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: "Microsoft YaHei", sans-serif;
+      }
+      #pet {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 160px;
+        height: 160px;
+        margin-left: -80px;
+        margin-top: -80px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 35%, #bfe3e0, #5aa8a0);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      }
+      #debug {
+        position: absolute;
+        left: 12px;
+        top: 12px;
+        color: #ffffff;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="pet"></div>
+    <div id="debug">loading…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

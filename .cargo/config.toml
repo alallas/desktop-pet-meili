@@ -1,0 +1,17 @@
+# 本机 Windows GNU 工具链特殊配置
+# 背景：机器无 MSVC（缺 Windows SDK 库文件），默认 windows-gnu 工具链
+# 自带的 ld 版本过旧，与新版导入库混链会产出 Windows 拒绝加载的 PE。
+# 方案：链接统一走 rust 自带的 rust-lld（ld 风格参数）+ 自包含运行时库；
+# -Zunstable-options 在 stable 上需 RUSTC_BOOTSTRAP=1。
+# 资源编译（windres）仍需 m2w64 binutils，见 scripts/dev-shell.sh。
+
+[build]
+rustflags = [
+  "-Zunstable-options",
+  "-Clinker-flavor=gnu-lld",
+  "-Clinker=rust-lld",
+  "-Clink-self-contained=y",
+]
+
+[env]
+RUSTC_BOOTSTRAP = "1"

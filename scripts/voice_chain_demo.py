@@ -110,24 +110,36 @@ class VoiceChain:
         self._sd = None
         if use_tts:
             import os
+            import threading
 
             os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-            from tts_demo_kokoro import load_pipeline, synth
+            print("后台加载 Kokoro TTS（不阻塞监听）…", flush=True)
 
-            print("加载 Kokoro TTS…", flush=True)
-            self.tts = load_pipeline()
-            synth(self.tts, "预热。")  # 冷启动耗时不能算进对话延迟
+            def _load_tts():
+                from tts_demo_kokoro import load_pipeline, synth
+
+                p = load_pipeline()
+                synth(p, "预热。")  # 冷启动耗时不能算进对话延迟
+                self.tts = p
+                print("TTS 就绪", flush=True)
+
+            threading.Thread(target=_load_tts, daemon=True).start()
             import sounddevice as sd
 
             self._sd = sd
-            print("TTS 就绪", flush=True)
 
     def reply_and_play(self, asr_text: str):
         """M0 占位回复：复读 + 口癖，验证 ASR→TTS→出声全链路"""
+        core = asr_text.strip("。，！？、… ")
+        if len(core) < 2:
+            print("[TTS] 转写太短，跳过回复", flush=True)
+            return
+        while self.tts is None:
+            time.sleep(0.2)  # 等后台 TTS 加载完成
         t0 = time.perf_counter()
         from tts_demo_kokoro import synth
 
-        samples, tts_ms = synth(self.tts, f"我听到你说：{asr_text}。然后呢，我还不太会聊天，请多包涵。")
+        samples, tts_ms = synth(self.tts, f"我听到你说：{core}。然后呢，我还不太会聊天，请多包涵。")
         print(f"[TTS] 回复合成={tts_ms:.0f}ms，播放中…", flush=True)
         self._sd.play(samples, 24000)
         self._sd.wait()
@@ -153,10 +165,10 @@ class VoiceChain:
         elif self.state == "LISTENING":
             self.utterance = np.concatenate([self.utterance, chunk])
             self.detector.accept_waveform(chunk)
-            if not self.detector.empty():
+            while not self.detector.empty():  # drain 已检出的语音段，防缓冲膨胀
+                self.detector.pop()
+            if self.detector.is_speech_detected():  # 实时说话状态；empty() 在说话中也是空，不能用
                 self.silence_samples = 0
-                while not self.detector.empty():  #  drain 已检出的语音段
-                    self.detector.pop()
             else:
                 self.silence_samples += len(chunk)
                 if self.silence_samples > SAMPLE_RATE * 0.8 and len(self.utterance) > SAMPLE_RATE * 0.5:

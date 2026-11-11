@@ -208,3 +208,17 @@ addEventListener("resize", () => {
 });
 
 await refresh();
+
+// ---------- M1-1 IPC ping-pong 样例 ----------
+// Booted 事件（Rust→WebView）+ ping 命令（WebView→Rust）双通道验证。
+// 结果写 %TEMP%\chaojiandai-debug.log；M1-2 事件监视器调试页上线后移除本段。
+import { commands, events } from "./ipc/client";
+void events.booted.listen((e) => {
+  void commands
+    .debugLog(
+      `[ipc-sample] Booted received: kind=${e.payload.kind} payload=${JSON.stringify(e.payload.payload)}`
+    )
+    .then(() => commands.ping("hello from webview"))
+    .then((pong) => commands.debugLog(`[ipc-sample] ping -> ${pong}`))
+    .catch((err) => commands.debugLog(`[ipc-sample] ERROR ${String(err)}`));
+});

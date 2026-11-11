@@ -16,14 +16,17 @@ MODELS = ROOT / "models"
 SAMPLE_RATE = 16000
 
 
-def load_kws(keywords_file: str = "keywords.txt"):
+def load_kws(keywords_file: str = "kws/keywords.txt"):
     kws_dir = MODELS / "kws"
+    kf = Path(keywords_file)
+    if not kf.is_absolute():
+        kf = MODELS / kf  # 相对路径一律按 models/ 解析，别依赖 CWD
     return sherpa_onnx.KeywordSpotter(
         tokens=str(kws_dir / "tokens.txt"),
         encoder=str(kws_dir / "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
         decoder=str(kws_dir / "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
         joiner=str(kws_dir / "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
-        keywords_file=str(keywords_file),
+        keywords_file=str(kf),
         num_threads=2,
         keywords_score=1.0,
         keywords_threshold=0.25,
@@ -89,7 +92,7 @@ def run_file_mode():
 class VoiceChain:
     """实时状态机：IDLE(KWS 唤醒) → LISTENING(VAD 断句) → RECOGNIZING(ASR)。麦克风与回放共用。"""
 
-    def __init__(self, keywords_file: str = "keywords.txt", use_tts: bool = False):
+    def __init__(self, keywords_file: str = "kws/keywords.txt", use_tts: bool = False):
         self.spotter = load_kws(keywords_file)
         self.recognizer = load_asr()
         vad = sherpa_onnx.VadModelConfig(
@@ -190,7 +193,7 @@ def run_mic_mode(device: int | None, use_tts: bool = False):
     import sounddevice as sd
 
     chain = VoiceChain(use_tts=use_tts)
-    print("麦克风监听中，喊唤醒词（如「林美丽」）开始对话，Ctrl+C 退出")
+    print("麦克风监听中，喊「美丽」开始对话，Ctrl+C 退出")
 
     def on_audio(indata, frames, time_info, status):
         chain.process_chunk(indata[:, 0].copy())
@@ -206,7 +209,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", action="store_true", help="用测试 wav 离线验证 KWS+ASR")
     parser.add_argument("--replay", type=str, default=None, help="把指定 wav 喂给实时状态机（自动化）")
-    parser.add_argument("--keywords", type=str, default="keywords.txt", help="关键词表文件名（models/ 下）")
+    parser.add_argument("--keywords", type=str, default="kws/keywords.txt", help="关键词表文件名（models/ 下，相对路径以 models/ 为根）")
     parser.add_argument("--device", type=int, default=None, help="麦克风设备号（sounddevice 列表）")
     parser.add_argument("--tts", action="store_true", help="接入 Kokoro TTS，ASR 后出声回复")
     args = parser.parse_args()

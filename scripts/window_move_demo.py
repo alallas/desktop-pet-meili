@@ -41,17 +41,27 @@ def main():
 
     hwnd = find_pet_window()
     x0, y0, x1, y1 = get_rect(hwnd)
-    w, h = x1 - x0, y1 - y0
     sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-    print(f"窗口: {w}x{h} @ ({x0},{y0}) | 屏幕(逻辑): {sw}x{sh}")
+    print(f"启动时窗口: {x1-x0}x{y1-y0} @ ({x0},{y0}) | 屏幕(逻辑): {sw}x{sh}")
 
-    # 巡逻路径：沿屏幕下缘左右走动，到边缘折返（M1 的"攀爬"先验证水平移动）
-    y_bottom = sh - h  # 窗口贴屏幕下缘
-    speed = 400.0  # 逻辑像素/秒
-    x = float(x0)
-    direction = 1.0 if x0 <= 0 else -1.0
-    if x0 <= 0:
-        x = 0.0
+    # 关键修正：把窗口缩到桌宠大小，窗口移动=桌宠移动，巡逻范围=整个屏幕
+    # （M0-1 的窗口是接近全屏的 1293x808，直接移窗只能动 13px，视觉上就是原地抖动）
+    PET = 360
+    user32.SetWindowPos(hwnd, 0, sw - PET, sh - PET, PET, PET, SWP_NOZORDER | SWP_NOACTIVATE)
+    w = h = PET
+    print(f"已缩放窗口到 {PET}x{PET}（模拟 M1 的桌宠专属小窗），位于右下角")
+
+    # 巡逻路径：沿屏幕下缘走到左下角 → 爬到屏幕顶 → 走回右侧 → 落回右下角
+    # （水平巡逻 + 垂直攀爬一次验证完；边缘检测 = 窗口矩形 vs 屏幕矩形）
+    speed = 350.0  # 逻辑像素/秒
+    stages = [
+        ("沿下缘左行", sw - PET, sh - PET, 0, sh - PET),
+        ("沿左缘攀爬", 0, sh - PET, 0, 0),
+        ("沿上缘右行", 0, 0, sw - PET, 0),
+        ("沿右缘落下", sw - PET, 0, sw - PET, sh - PET),
+    ]
+    stage_i = 0
+    x, y = float(sw - PET), float(sh - PET)
 
     dt = 1.0 / args.hz
     t_end = time.perf_counter() + args.seconds
@@ -60,15 +70,22 @@ def main():
     setwindowpos_ms = []  # 每次 SetWindowPos 真实耗时
     t_prev = time.perf_counter()
 
-    print(f"开始巡逻 {args.seconds}s @ {args.hz}Hz，速度 {speed}px/s …")
-    while time.perf_counter() < t_end:
-        x += direction * speed * dt
-        if x <= 0:
-            x, direction = 0.0, 1.0
-        elif x >= sw - w:
-            x, direction = float(sw - w), -1.0
+    print(f"开始巡逻 {args.seconds}s @ {args.hz}Hz，速度 {speed}px/s（下缘→左爬→上缘→右落）…")
+    while time.perf_counter() < t_end and stage_i < len(stages):
+        name, x_from, y_from, x_to, y_to = stages[stage_i]
+        dx, dy = x_to - x_from, y_to - y_from
+        x += speed * dt * (1 if dx > 0 else -1 if dx < 0 else 0)
+        y += speed * dt * (1 if dy > 0 else -1 if dy < 0 else 0)
+        # 边缘钳制 + 到达舞台终点判定（按方向检查过冲）
+        x = max(0.0, min(x, float(sw - w)))
+        y = max(0.0, min(y, float(sh - h)))
+        arrived = (dx <= 0 and x <= x_to) or (dx >= 0 and x >= x_to)
+        arrived = arrived and ((dy <= 0 and y <= y_to) or (dy >= 0 and y >= y_to))
+        if arrived:
+            x, y = float(x_to), float(y_to)
+            stage_i += 1
         t_call = time.perf_counter()
-        move_to(hwnd, x, y_bottom)
+        move_to(hwnd, x, y)
         setwindowpos_ms.append((time.perf_counter() - t_call) * 1000)
 
         now = time.perf_counter()
@@ -84,10 +101,10 @@ def main():
 
     arr = np.array(intervals[1:]) * 1000
     calls = np.array(setwindowpos_ms)
-    print(f"\n结果: {n_frames} 帧 / {args.seconds:.1f}s")
+    print(f"\n结果: {n_frames} 帧 / {args.seconds:.1f}s，完成舞台 {stage_i}/{len(stages)}")
     print(f"  位置更新间隔: 平均 {arr.mean():.1f}ms, p95 {np.percentile(arr, 95):.1f}ms, 最大 {arr.max():.1f}ms")
     print(f"  SetWindowPos 单次: 平均 {calls.mean():.2f}ms, 最大 {calls.max():.2f}ms")
-    print(f"  边缘检测: 窗口范围 [{0},{sw-w}], 本次折返 {'是' if n_frames else '否'}")
+    print(f"  边缘钳制: x∈[0,{sw-w}] y∈[0,{sh-h}]，生效")
 
     # 归位：回到启动时的位置
     move_to(hwnd, x0, y0)

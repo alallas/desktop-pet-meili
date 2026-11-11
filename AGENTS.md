@@ -22,3 +22,4 @@ cd src-tauri && cargo build    # 编译（禁止全量 clean，缓存很贵）
 - 不执行全量 `cargo clean`；只许 `cargo clean -p chaojiandai`。
 - 工具链目录 `tools/` 不进 git；不放 /tmp。
 - GitHub 不通，下载走清华镜像。
+- 每完成一个任务就提交一次代码（git commit，信息写清任务编号与结论）。

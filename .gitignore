@@ -9,3 +9,10 @@ tools/
 # Python
 __pycache__/
 *.pyc
+
+# mingw 运行时头文件（体积大，随需下载）
+tools/m2w64-headers/
+tools/m2w64-winpthreads/
+
+# sqlite 预编译二进制（坑 25）
+tools/sqlite3/

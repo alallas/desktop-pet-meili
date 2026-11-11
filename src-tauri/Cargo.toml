@@ -11,3 +11,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 不 bundled：本机 gcc 5.3 编译 sqlite3.c 必 ICE（踩坑档案坑 25），
+# 链接 sqlite.org 官方预编译 sqlite3.dll（仅依赖 KERNEL32，导入库 dlltool 生成）。
+# 路径由仓库根 .cargo/config.toml 的 SQLITE3_LIB_DIR / SQLITE3_INCLUDE_DIR 提供。
+rusqlite = { version = "0.32", default-features = false }
+# 显式关掉 libsqlite3-sys 默认的 bundled（它会编译 C 源码，本机 gcc 5.3 必 ICE，坑 25）
+libsqlite3-sys = { version = "0.30", default-features = false }
+thiserror = "1"

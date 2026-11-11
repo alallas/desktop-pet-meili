@@ -29,6 +29,12 @@ fn main() {
             }
             // M0 验证：默认点击穿透，悬浮层不阻塞桌面操作
             let _ = win.set_ignore_cursor_events(true);
+            // M1-1：存档库（八张表，架构 §3.8；目录为 %APPDATA%/<identifier>/saves/）
+            let save_dir = app.path().app_data_dir()?.join("saves");
+            std::fs::create_dir_all(&save_dir).expect("create save dir");
+            let conn = db::open(&save_dir.join("save.db")).expect("open save db");
+            // rusqlite::Connection 是 Send 但非 Sync，Mutex 包装后共享（IPC 多线程访问的正确姿势）
+            app.manage(std::sync::Mutex::new(conn));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

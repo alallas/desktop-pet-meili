@@ -15,3 +15,6 @@ rustflags = [
 
 [env]
 RUSTC_BOOTSTRAP = "1"
+# sqlite 链接（坑 25）：sqlite.org 官方 dll + dlltool 导入库，见 src-tauri/Cargo.toml 注释
+SQLITE3_LIB_DIR = { value = "tools/sqlite3", relative = true }
+SQLITE3_INCLUDE_DIR = { value = "tools/sqlite3/amlg/sqlite-amalgamation-3540100", relative = true }

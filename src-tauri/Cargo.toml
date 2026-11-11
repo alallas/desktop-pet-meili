@@ -3,6 +3,7 @@ name = "chaojiandai"
 version = "0.0.1"
 description = "潮间带 —— 住在桌面上的海洋收容所"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

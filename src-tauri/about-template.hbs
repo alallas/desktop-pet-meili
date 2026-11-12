@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>潮间带 · 第三方开源许可</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+h1 { font-size: 1.4rem; } h2 { font-size: 1.05rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .3rem; }
+pre { white-space: pre-wrap; font-size: .78rem; background: #f6f6f6; padding: .8rem; border-radius: 6px; max-height: 16rem; overflow: auto; }
+.crate { display: inline-block; background: #eef3f8; border-radius: 4px; padding: .05rem .45rem; margin: .1rem; font-size: .8rem; font-family: monospace; }
+.muted { color: #888; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>潮间带（Chaojiandai）· 第三方开源许可</h1>
+<p class="muted">本页由 cargo-about 自动生成（发版 checklist ②：每次发版重新生成）。</p>
+{{#each licenses}}
+<h2>{{id}}</h2>
+<div>{{#each used_by}}<span class="crate">{{crate.name}} {{crate.version}}</span>{{/each}}</div>
+<details><summary>许可全文</summary><pre>{{text}}</pre></details>
+{{/each}}
+</body>
+</html>

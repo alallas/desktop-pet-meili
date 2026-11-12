@@ -1,0 +1,8 @@
+# cargo-about 配置：生成第三方许可声明页（工程规范 §9.1 检查点 / 发版 checklist ②）
+# 与 deny.toml 白名单同口径
+accepted = [
+    "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause", "BSD-3-Clause", "ISC", "CC0-1.0", "Zlib",
+    "Unicode-DFS-2016", "Unicode-3.0", "0BSD", "Unlicense",
+    "MPL-2.0",
+]

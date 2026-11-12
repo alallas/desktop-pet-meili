@@ -50,10 +50,15 @@ export type EventKind =
 /**  唤醒词命中（本地 KWS，音频不出本机）。payload: {keyword} */
 "WakeWord" | 
 /**
- *  一句指令语音结束（本地 VAD 断句；音频本体留 Rust 侧给 ASR，M1-3.4 消费）。
+ *  一句指令语音结束（本地 VAD 断句；音频本体留 Rust 侧给 ASR 消费）。
  *  payload: {duration_ms}
  */
-"UtteranceEnded";
+"UtteranceEnded" | 
+/**
+ *  本地 ASR（SenseVoice）转写完成。payload: {text, duration_ms}。
+ *  文本是语音内容本体：隐私档 Balanced
+ */
+"TranscriptReady";
 
 /**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
 export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Media" | "Voice" | "Test";

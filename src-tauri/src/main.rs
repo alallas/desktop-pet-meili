@@ -48,6 +48,22 @@ fn main() {
                 .expect("open rust log")
         })
         .init();
+    // panic 落盘：GUI 程序（windows_subsystem）无控制台，默认 hook 的 panic 信息直接丢。
+    // 工作线程（语音引擎/采集器）panic = 功能静默消失，必须留下遗言。
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("thread panic: {info}");
+        tracing::error!("{msg}");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("chaojiandai-rust.log"))
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{msg}");
+        }
+        default_hook(info);
+    }));
     let builder = specta_builder();
     export_typescript_bindings(&builder);
     // 返回的闭包自持 Arc（'static），builder 本体随后 move 进 setup 挂事件

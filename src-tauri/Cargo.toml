@@ -28,6 +28,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse", # GetLastInputInfo（空闲检测）
     "Win32_Foundation",
     "Win32_System_SystemInformation", # GetTickCount 备用
+    "Win32_System_Power",             # GetSystemPowerStatus（电源采集）
+    "Win32_System_RemoteDesktop",   # WTSRegisterSessionNotification（锁屏采集）
+    "Win32_NetworkManagement_IpHelper", # NotifyAddrChange/GetAdaptersAddresses（网络采集）
+    "Win32_NetworkManagement_Ndis",     # IpHelper 函数按项门控（GetAdaptersAddresses 需要）
+    "Win32_Networking_WinSock",         # 同上（NDIS 结构引用的类型）
+    "Win32_System_IO",                  # NotifyAddrChange 按项门控
 ] }
 tracing = "0.1"
 specta = { version = "2.0.0-rc.28", features = ["serde_json"] }

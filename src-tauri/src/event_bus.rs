@@ -35,6 +35,7 @@ impl EventBus {
 
     /// 采集器投递入口。返回 false 表示被传输级削峰拦截。
     pub fn publish(&self, event: StdEvent) -> bool {
+        self.tee_to_log(&event);
         if self.is_high_freq(event.kind) {
             let key = format!("{:?}:{:?}", event.source, event.kind);
             let allowed = self
@@ -57,6 +58,23 @@ impl EventBus {
             tracing::warn!("event emit failed: {e}");
         }
         true
+    }
+
+    /// 调试落盘：`CHAOJIANDAI_EVENT_LOG=1` 启动时把每条过线事件追加到
+    /// `%TEMP%\chaojiandai-events.log`（验证采集器用；正常启动零开销）。
+    fn tee_to_log(&self, event: &StdEvent) {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !ENABLED.get_or_init(|| std::env::var_os("CHAOJIANDAI_EVENT_LOG").is_some()) {
+            return;
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("chaojiandai-events.log"))
+        {
+            let _ = writeln!(f, "{:?} {:?} {}", event.source, event.kind, event.payload);
+        }
     }
 
     fn is_high_freq(&self, kind: EventKind) -> bool {

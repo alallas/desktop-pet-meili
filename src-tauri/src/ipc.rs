@@ -25,6 +25,10 @@ pub enum EventSource {
     ForegroundWindow, // 前台窗口变化（SetWinEventHook EVENT_SYSTEM_FOREGROUND）
     WindowTrack,      // 窗口位置跟踪（同钩子的 LOCATIONCHANGE）
     Idle,             // 空闲时长（GetLastInputInfo ≤1Hz 轮询）
+    Mouse,            // 全局鼠标按键（WH_MOUSE_LL 低级钩子）
+    Power,            // 电源状态（GetSystemPowerStatus 1Hz 轮询）
+    Network,          // 网络连通性（NotifyAddrChange 事件 + 网关探测）
+    Session,          // 会话状态（WTS 锁屏/解锁事件）
     Test,
 }
 
@@ -42,6 +46,14 @@ pub enum EventKind {
     SelfWindowMoved,
     /// 空闲状态翻转。payload: {idle_seconds, is_idle}
     IdleStateChanged,
+    /// 全局鼠标按键按下（左/右/中）。payload: {button, x, y}
+    MouseClicked,
+    /// 电源状态变化（插电/用电池/充电翻转/电量档位跳变）。payload: {ac_online, charging, battery_percent}
+    PowerStateChanged,
+    /// 网络连通性变化（有无可上网网关的网卡）。payload: {connected}
+    NetworkChanged,
+    /// 锁屏/解锁。payload: {locked}
+    LockStateChanged,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式

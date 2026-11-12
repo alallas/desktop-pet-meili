@@ -36,10 +36,18 @@ export type EventKind =
 /**  自窗口被移动（外部拖动或别的程序挪了我们）。payload: {x, y} */
 "SelfWindowMoved" | 
 /**  空闲状态翻转。payload: {idle_seconds, is_idle} */
-"IdleStateChanged";
+"IdleStateChanged" | 
+/**  全局鼠标按键按下（左/右/中）。payload: {button, x, y} */
+"MouseClicked" | 
+/**  电源状态变化（插电/用电池/充电翻转/电量档位跳变）。payload: {ac_online, charging, battery_percent} */
+"PowerStateChanged" | 
+/**  网络连通性变化（有无可上网网关的网卡）。payload: {connected} */
+"NetworkChanged" | 
+/**  锁屏/解锁。payload: {locked} */
+"LockStateChanged";
 
 /**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
-export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Test";
+export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Test";
 
 /**  事件总线对外流（Rust→WebView，事件监视器调试页订阅） */
 export type EventStream = StdEvent;

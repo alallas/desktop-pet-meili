@@ -11,6 +11,10 @@ use tauri::AppHandle;
 use crate::event_bus::EventBus;
 
 pub mod idle;
+pub mod mouse;
+pub mod network;
+pub mod power;
+pub mod session;
 pub mod win_event;
 
 /// 事件源采集器统一接口。实现体是无状态/轻状态的 `struct`，启动即交出一个线程。
@@ -27,6 +31,10 @@ pub fn start_all(app: AppHandle) {
     let collectors: Vec<Box<dyn Collector>> = vec![
         Box::new(win_event::WinEventCollector::new(app)),
         Box::new(idle::IdleCollector),
+        Box::new(mouse::MouseCollector),
+        Box::new(power::PowerCollector),
+        Box::new(network::NetworkCollector),
+        Box::new(session::SessionCollector),
     ];
     for c in collectors {
         match c.start(bus.clone()) {

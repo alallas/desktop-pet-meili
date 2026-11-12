@@ -97,13 +97,11 @@ function play(name: AnimName) {
 // ---------- 光标跟随（点击穿透下轮询 Rust 侧全局光标）----------
 const cursorNDC = new THREE.Vector2(0, -0.5); // 默认看向下方（"坐着"的感觉）
 const cursorTarget = new THREE.Vector3(0, 0.6, 2);
-let cursorScreen: [number, number] | null = null;
 
 async function pollCursor() {
   const [cx, cy] = (await invoke("get_cursor_position")) as [number, number];
   const pos = await win.outerPosition();
   const size = await win.outerSize();
-  cursorScreen = [cx, cy];
   // 屏幕坐标 → 窗口 NDC
   const x = ((cx - pos.x) / size.width) * 2 - 1;
   const y = -(((cy - pos.y) / size.height) * 2 - 1);

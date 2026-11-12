@@ -29,7 +29,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::get_cursor_position,
             ipc::debug_log,
         ])
-        .events(tauri_specta::collect_events![ipc::Booted])
+        .events(tauri_specta::collect_events![ipc::Booted, ipc::EventStream])
         .typ::<ipc::StdEvent>()
         .typ::<ipc::EventSource>()
         .typ::<ipc::EventKind>()
@@ -60,6 +60,9 @@ fn main() {
             let conn = db::open(&save_dir.join("save.db")).expect("open save db");
             // rusqlite::Connection 是 Send 但非 Sync，Mutex 包装后共享（IPC 多线程访问的正确姿势）
             app.manage(std::sync::Mutex::new(conn));
+            // M1-2：系统层事件采集（前台窗口钩子 + 空闲轮询），统一投事件总线；
+            // 其余采集器（鼠标/SMTC/电源/网络/锁屏）后续按提交增量接入 start_all。
+            event_collector::start_all(app.handle().clone());
             // M1-1：事件通道样例——启动完成事件（ping-pong 的另一半在前端 listen）。
             // 延迟 1s 发射：setup 阶段 WebView 尚未加载，立即发会被错过（事件不排队）。
             builder.mount_events(app);

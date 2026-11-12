@@ -18,19 +18,31 @@ export const commands = {
 /** Events */
 export const events = {
 	booted: makeEvent<Booted, Booted>("booted"),
+	eventStream: makeEvent<EventStream, EventStream>("event-stream"),
 };
 
 /* Types */
 /**  启动完成事件（Rust→WebView，展示事件通道） */
 export type Booted = StdEvent;
 
-/**  事件类型（封闭集；M1-2 随采集器扩展） */
+/**  事件类型（封闭集；随采集器扩展） */
 export type EventKind = 
 /**  应用启动完成（M1-1 ping-pong 样例用的载具） */
-"Booted" | "Ping";
+"Booted" | "Ping" | 
+/**  前台应用切换。payload: {app, title} */
+"ForegroundSwitched" | 
+/**  前台窗口被移动/改变大小。payload: {app, rect} */
+"ForegroundMoved" | 
+/**  自窗口被移动（外部拖动或别的程序挪了我们）。payload: {x, y} */
+"SelfWindowMoved" | 
+/**  空闲状态翻转。payload: {idle_seconds, is_idle} */
+"IdleStateChanged";
 
-/**  事件来源（封闭集；M1-2 每个采集器一个变体） */
-export type EventSource = "System" | "Test";
+/**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
+export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Test";
+
+/**  事件总线对外流（Rust→WebView，事件监视器调试页订阅） */
+export type EventStream = StdEvent;
 
 /**  隐私三档（产品 §6，档位语义见 settings） */
 export type PrivacyTier = "Minimal" | "Balanced" | "Companion";

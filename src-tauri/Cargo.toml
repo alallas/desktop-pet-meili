@@ -29,6 +29,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_SystemInformation", # GetTickCount 备用
 ] }
+tracing = "0.1"
 specta = { version = "2.0.0-rc.28", features = ["serde_json"] }
 specta-typescript = "0.0.15"
 tauri-specta = { version = "2.0.0-rc.28", features = ["typescript", "derive"] }

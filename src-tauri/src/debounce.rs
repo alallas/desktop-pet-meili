@@ -23,6 +23,7 @@ impl Cooling {
     }
 
     /// true = 放行；同时刷新该 key 的冷却计时。
+    /// 不做 gc：调用方的 key 集合有界（封闭枚举的 kind 组合），map 不会无限增长。
     pub fn allow(&mut self, key: &str) -> bool {
         let now = Instant::now();
         match self.last_fired.get(key) {
@@ -32,13 +33,6 @@ impl Cooling {
                 true
             }
         }
-    }
-
-    /// 丢弃长期不活动的 key，防 map 无限增长。
-    pub fn gc(&mut self, max_idle: Duration) {
-        let now = Instant::now();
-        self.last_fired
-            .retain(|_, t| now.duration_since(*t) < max_idle);
     }
 }
 
@@ -71,10 +65,6 @@ impl Hysteresis {
         }
         (prev != self.active, self.active)
     }
-
-    pub fn is_active(&self) -> bool {
-        self.active
-    }
 }
 
 #[cfg(test)]
@@ -89,16 +79,6 @@ mod tests {
         assert!(c.allow("other"), "不同 key 互不影响");
         std::thread::sleep(Duration::from_millis(110));
         assert!(c.allow("fg.move"), "冷却后放行");
-    }
-
-    #[test]
-    fn cooling_gc_drops_stale_keys() {
-        let mut c = Cooling::new(Duration::from_millis(10));
-        c.allow("a");
-        c.allow("b");
-        std::thread::sleep(Duration::from_millis(20));
-        c.gc(Duration::from_millis(15));
-        assert_eq!(c.last_fired.len(), 0, "过期 key 应被回收");
     }
 
     #[test]

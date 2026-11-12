@@ -181,7 +181,7 @@ async function refresh() {
     `面板矩形: ${Math.round(dbgRect.left)},${Math.round(dbgRect.top)} ${Math.round(dbgRect.width)}x${Math.round(dbgRect.height)}`,
     `窗口: ${size.width}x${size.height} @ (${pos.x}, ${pos.y})  穿透: ${clickThrough}`,
     ``,
-    `T 切换点击穿透 | Q 退出`,
+    `T 切换点击穿透 | M 事件监视器 | Q 退出`,
   ];
   debug.textContent = info.join("\n");
   invoke("debug_log", { msg: info.join(" | ") }).catch(() => {});
@@ -221,4 +221,42 @@ void events.booted.listen((e) => {
     .then(() => commands.ping("hello from webview"))
     .then((pong) => commands.debugLog(`[ipc-sample] ping -> ${pong}`))
     .catch((err) => commands.debugLog(`[ipc-sample] ERROR ${String(err)}`));
+});
+
+// ---------- M1-2 事件监视器调试页 ----------
+// 按 M 开关：固定定位 DOM 覆盖层，滚动显示事件总线原始流（最近 30 条，内存留 200）。
+// 贯穿 M1 全部阶段的调试工具：采集器对不对，看它最直接。
+const monitor = document.createElement("pre");
+monitor.style.cssText =
+  "position:fixed;left:8px;top:8px;width:560px;max-height:70vh;overflow-y:auto;margin:0;" +
+  "padding:8px;background:rgba(0,0,0,.72);color:#9fe8c0;font:11px/1.5 monospace;" +
+  "pointer-events:none;white-space:pre-wrap;word-break:break-all;display:none;z-index:99";
+document.body.appendChild(monitor);
+
+type StreamEvent = { ts: number; source: string; kind: string; payload: unknown };
+const eventLog: StreamEvent[] = [];
+
+function renderMonitor() {
+  monitor.textContent = eventLog
+    .slice(-30)
+    .map((e) => {
+      const t = new Date(e.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+      return `${t}  ${e.source}/${e.kind}  ${JSON.stringify(e.payload)}`;
+    })
+    .join("\n");
+  monitor.scrollTop = monitor.scrollHeight;
+}
+
+void events.eventStream.listen((e) => {
+  const s = e.payload;
+  eventLog.push({ ts: s.ts, source: String(s.source), kind: String(s.kind), payload: s.payload });
+  if (eventLog.length > 200) eventLog.splice(0, eventLog.length - 200);
+  if (monitor.style.display !== "none") renderMonitor();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "m" || e.key === "M") {
+    monitor.style.display = monitor.style.display === "none" ? "block" : "none";
+    if (monitor.style.display === "block") renderMonitor();
+  }
 });

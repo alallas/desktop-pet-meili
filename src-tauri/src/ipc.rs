@@ -18,19 +18,30 @@ pub enum PrivacyTier {
     Companion,
 }
 
-/// 事件来源（封闭集；M1-2 每个采集器一个变体）
+/// 事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档）
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
 pub enum EventSource {
     System,
+    ForegroundWindow, // 前台窗口变化（SetWinEventHook EVENT_SYSTEM_FOREGROUND）
+    WindowTrack,      // 窗口位置跟踪（同钩子的 LOCATIONCHANGE）
+    Idle,             // 空闲时长（GetLastInputInfo ≤1Hz 轮询）
     Test,
 }
 
-/// 事件类型（封闭集；M1-2 随采集器扩展）
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+/// 事件类型（封闭集；随采集器扩展）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 pub enum EventKind {
     /// 应用启动完成（M1-1 ping-pong 样例用的载具）
     Booted,
     Ping,
+    /// 前台应用切换。payload: {app, title}
+    ForegroundSwitched,
+    /// 前台窗口被移动/改变大小。payload: {app, rect}
+    ForegroundMoved,
+    /// 自窗口被移动（外部拖动或别的程序挪了我们）。payload: {x, y}
+    SelfWindowMoved,
+    /// 空闲状态翻转。payload: {idle_seconds, is_idle}
+    IdleStateChanged,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式
@@ -64,6 +75,10 @@ impl StdEvent {
 /// 启动完成事件（Rust→WebView，展示事件通道）
 #[derive(Debug, Clone, Serialize, Type, tauri_specta::Event)]
 pub struct Booted(pub StdEvent);
+
+/// 事件总线对外流（Rust→WebView，事件监视器调试页订阅）
+#[derive(Debug, Clone, Serialize, Type, tauri_specta::Event)]
+pub struct EventStream(pub StdEvent);
 
 fn uuid() -> String {
     // M1-1：无 uuid 依赖前的临时 id（进程内唯一即可）；repo.rs 落地时换正式实现

@@ -57,6 +57,7 @@ extern "C" {
         n: i32,
     );
     fn SherpaOnnxVoiceActivityDetectorEmpty(vad: *const c_void) -> i32;
+    fn SherpaOnnxVoiceActivityDetectorDetected(vad: *const c_void) -> i32;
     fn SherpaOnnxVoiceActivityDetectorFront(vad: *const c_void) -> *const SherpaOnnxSpeechSegment;
     fn SherpaOnnxDestroySpeechSegment(segment: *const SherpaOnnxSpeechSegment);
     fn SherpaOnnxVoiceActivityDetectorPop(vad: *const c_void);
@@ -162,6 +163,11 @@ impl Vad {
             SherpaOnnxVoiceActivityDetectorClear(self.vad);
             SherpaOnnxVoiceActivityDetectorReset(self.vad);
         }
+    }
+
+    /// 当前是否处于语音中（诊断探针：区分"麦没声"与"VAD 漏判"）
+    pub fn in_speech(&self) -> bool {
+        unsafe { SherpaOnnxVoiceActivityDetectorDetected(self.vad) == 1 }
     }
 }
 

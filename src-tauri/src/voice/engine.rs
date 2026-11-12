@@ -112,6 +112,39 @@ where
     )
 }
 
+/// LISTENING 态秒级音量探针：攒 1s 的平方和再开方，每 1s 报一次。
+/// 诊断工具（真人语音 VAD 漏检排查），稳定后可降为 debug 或移除。
+struct LevelMeter {
+    sum_sq: f64,
+    n: usize,
+}
+
+impl LevelMeter {
+    fn new() -> Self {
+        Self { sum_sq: 0.0, n: 0 }
+    }
+
+    fn accumulate(&mut self, samples: &[f32]) {
+        self.sum_sq += samples
+            .iter()
+            .map(|v| (*v as f64) * (*v as f64))
+            .sum::<f64>();
+        self.n += samples.len();
+    }
+
+    /// 攒满 1s（16k 采样）则返回该窗口 RMS 并重置；未满返回 None
+    fn tick(&mut self) -> Option<f64> {
+        if self.n >= 16000 {
+            let rms = (self.sum_sq / self.n as f64).sqrt();
+            self.n = 0;
+            self.sum_sq = 0.0;
+            Some(rms)
+        } else {
+            None
+        }
+    }
+}
+
 /// 引擎状态机（M1-3.3）：IDLE 常听唤醒词；命中 → LISTENING 采指令语音，
 /// VAD 断句出段 → UtteranceEnded 事件 → 回 IDLE。
 enum State {
@@ -127,6 +160,7 @@ fn consume(bus: EventBus, spotter: &mut KeywordSpotter, vad: &mut Vad, rx: Recei
     // 初始即允许首次命中（now() - cooldown）
     let mut last_wake = Instant::now() - WAKE_COOLDOWN;
     let mut state = State::Idle;
+    let mut meter = LevelMeter::new();
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(chunk) => buf.extend_from_slice(&chunk),
@@ -161,6 +195,16 @@ fn consume(bus: EventBus, spotter: &mut KeywordSpotter, vad: &mut Vad, rx: Recei
                 }
                 State::Listening { since } => {
                     feed_vad(vad, &mut vad_buf, &chunk);
+                    // 诊断探针：秒级音量/VAD 状态，区分"麦没声"与"VAD 漏判"
+                    meter.accumulate(&chunk);
+                    if let Some(rms) = meter.tick() {
+                        tracing::info!(
+                            rms = format_args!("{:.5}", rms),
+                            in_speech = vad.in_speech(),
+                            elapsed_ms = since.elapsed().as_millis(),
+                            "listening probe"
+                        );
+                    }
                     if let Some(duration_ms) = drain_vad_segment(vad) {
                         publish_utterance(&bus, duration_ms);
                         state = State::Idle;
@@ -300,6 +344,23 @@ mod tests {
         assert!(
             peak > 0.9,
             "8 周期正弦峰值应保留（线性插值不破幅度）: {peak}"
+        );
+    }
+
+    /// LevelMeter：满幅正弦 1s 的 RMS ≈ 0.707，1s 未满不报
+    #[test]
+    fn level_meter_rms() {
+        let mut m = LevelMeter::new();
+        let sine: Vec<f32> = (0..16000)
+            .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 100.0).sin() as f32)
+            .collect();
+        m.accumulate(&sine[..8000]);
+        assert!(m.tick().is_none(), "未满 1s 不应出数");
+        m.accumulate(&sine[8000..]);
+        let rms = m.tick().expect("满 1s 应出数");
+        assert!(
+            (rms - 2.0_f64.sqrt() / 2.0).abs() < 0.01,
+            "满幅正弦 RMS: {rms}"
         );
     }
 

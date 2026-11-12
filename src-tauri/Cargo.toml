@@ -19,6 +19,16 @@ rusqlite = { version = "0.41", default-features = false }
 # 显式关掉 libsqlite3-sys 默认的 bundled（它会编译 C 源码，本机 gcc 5.3 必 ICE，坑 25）；
 # ≥0.39 修复 RUSTSEC-2026-0459（bundled 场景的 CVE；本工程链接官方 3.54.1 dll，双重规避）
 libsqlite3-sys = { version = "0.39", default-features = false }
+# 系统 API 绑定，版本与 tauri 内部使用的 windows-sys 0.61 保持一致（不引第二份）
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_Accessibility",     # SetWinEventHook / UnhookWinEvent
+    "Win32_UI_WindowsAndMessaging", # GetForegroundWindow / GetWindowTextW / GetWindowThreadProcessId
+    "Win32_System_Threading",     # OpenProcess / QueryFullProcessImageNameW
+    "Win32_System_ProcessStatus", # QueryProcessCycleTime?（备用）+ PSAPI 基础
+    "Win32_UI_Input_KeyboardAndMouse", # GetLastInputInfo（空闲检测）
+    "Win32_Foundation",
+    "Win32_System_SystemInformation", # GetTickCount 备用
+] }
 specta = { version = "2.0.0-rc.28", features = ["serde_json"] }
 specta-typescript = "0.0.15"
 tauri-specta = { version = "2.0.0-rc.28", features = ["typescript", "derive"] }

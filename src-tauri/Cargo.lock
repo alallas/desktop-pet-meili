@@ -345,6 +345,7 @@ dependencies = [
  "tauri-build",
  "tauri-specta",
  "thiserror 1.0.69",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -40,6 +40,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 # 麦克风采集（KWS/VAD 的音频源）。WASAPI 后端，MIT/Apache-2.0（白名单内）
 cpal = "0.15"
+# 本地 LLM 通信（llama-server 是 OpenAI 兼容 HTTP，只走 127.0.0.1）。MIT/Apache-2.0
+# json feature：send_json/into_json；默认不带
+# default-features = false：默认 tls（rustls）会把 webpki-roots（CDLA-Permissive-2.0）拖进许可检查，
+# 而 llama-server 只走 127.0.0.1，根本用不到 TLS
+ureq = { version = "2", default-features = false, features = ["json"] }
 # WinRT（SMTC 媒体会话等）。版本与 wry 带入的 0.62.2 对齐共用；windows-sys 管 Win32，本 crate 管 WinRT
 windows = { version = "0.62", features = ["Media_Control", "Foundation"] }
 specta = { version = "2.0.0-rc.28", features = ["serde_json"] }

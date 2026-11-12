@@ -84,7 +84,16 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     stream.play()?;
     tracing::info!("voice engine: listening for wake word");
 
-    consume(bus, &mut spotter, &mut vad, &asr, rx);
+    // 思考层（本地 Qwen3-4B sidecar）：启动失败不致命——语音链路照常，只是没回复
+    let mut thinker = match crate::llm::Thinker::start() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!("thinker unavailable, replies disabled: {e:#}");
+            None
+        }
+    };
+
+    consume(bus, &mut spotter, &mut vad, &asr, thinker.as_mut(), rx);
     Ok(())
 }
 
@@ -167,6 +176,7 @@ fn consume(
     spotter: &mut KeywordSpotter,
     vad: &mut Vad,
     asr: &Recognizer,
+    mut thinker: Option<&mut crate::llm::Thinker>,
     rx: Receiver<Vec<f32>>,
 ) {
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
@@ -233,6 +243,24 @@ fn consume(
                                     "asr transcript"
                                 );
                                 publish_transcript(&bus, &text, duration_ms);
+                                // 思考层（阻塞 ~2–5s）：无 key 的本地路径，人设见 llm/mod.rs
+                                if let Some(thinker) = thinker.as_deref_mut() {
+                                    let t1 = Instant::now();
+                                    let (reply, fallback) = match thinker.think(&text) {
+                                        Ok(r) => (r, false),
+                                        Err(e) => {
+                                            tracing::error!("think failed: {e:#}");
+                                            (crate::llm::FALLBACK_REPLY.to_string(), true)
+                                        }
+                                    };
+                                    tracing::info!(
+                                        latency_ms = t1.elapsed().as_millis(),
+                                        fallback = fallback,
+                                        text = %reply,
+                                        "llm reply"
+                                    );
+                                    publish_reply(&bus, &reply, t1.elapsed().as_millis());
+                                }
                             }
                             Err(e) => tracing::error!("asr failed: {e:#}"),
                         }
@@ -288,6 +316,17 @@ fn publish_transcript(bus: &EventBus, text: &str, duration_ms: u64) {
         EventSource::Voice,
         EventKind::TranscriptReady,
         serde_json::json!({ "text": text, "duration_ms": duration_ms }),
+    );
+    event.privacy_tier = PrivacyTier::Balanced;
+    bus.publish(event);
+}
+
+/// 思考层回复事件（M1-3.5a 终点；TTS 消费见 M1-3.5b）
+fn publish_reply(bus: &EventBus, text: &str, latency_ms: u128) {
+    let mut event = bus.event(
+        EventSource::Voice,
+        EventKind::ReplyReady,
+        serde_json::json!({ "text": text, "latency_ms": latency_ms }),
     );
     event.privacy_tier = PrivacyTier::Balanced;
     bus.publish(event);

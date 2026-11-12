@@ -66,6 +66,8 @@ pub enum EventKind {
     /// 本地 ASR（SenseVoice）转写完成。payload: {text, duration_ms}。
     /// 文本是语音内容本体：隐私档 Balanced
     TranscriptReady,
+    /// 思考层（本地 Qwen3-4B，人设 prompt 装配）回复完成。payload: {text, latency_ms}
+    ReplyReady,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式

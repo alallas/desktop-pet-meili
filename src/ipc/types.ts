@@ -58,7 +58,9 @@ export type EventKind =
  *  本地 ASR（SenseVoice）转写完成。payload: {text, duration_ms}。
  *  文本是语音内容本体：隐私档 Balanced
  */
-"TranscriptReady";
+"TranscriptReady" | 
+/**  思考层（本地 Qwen3-4B，人设 prompt 装配）回复完成。payload: {text, latency_ms} */
+"ReplyReady";
 
 /**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
 export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Media" | "Voice" | "Test";

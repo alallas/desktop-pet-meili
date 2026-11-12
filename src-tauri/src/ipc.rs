@@ -60,9 +60,12 @@ pub enum EventKind {
     MediaPlaybackChanged,
     /// 唤醒词命中（本地 KWS，音频不出本机）。payload: {keyword}
     WakeWord,
-    /// 一句指令语音结束（本地 VAD 断句；音频本体留 Rust 侧给 ASR，M1-3.4 消费）。
+    /// 一句指令语音结束（本地 VAD 断句；音频本体留 Rust 侧给 ASR 消费）。
     /// payload: {duration_ms}
     UtteranceEnded,
+    /// 本地 ASR（SenseVoice）转写完成。payload: {text, duration_ms}。
+    /// 文本是语音内容本体：隐私档 Balanced
+    TranscriptReady,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式

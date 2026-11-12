@@ -18,8 +18,9 @@ use cpal::Sample; // f32::from_sample（Sample trait 方法，需显式引入）
 use crate::event_bus::EventBus;
 use crate::ipc::{EventKind, EventSource, PrivacyTier};
 
+use super::asr::Recognizer;
 use super::kws::KeywordSpotter;
-use super::vad::Vad;
+use super::vad::{SpeechSegment, Vad};
 
 /// 喂给 KWS 的块大小（0.1s @16k；M0 Python demo 用 0.2s，流式减半降低命中延迟）
 const CHUNK_SAMPLES: usize = 1600;
@@ -46,6 +47,14 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = model_dir.to_str().ok_or("模型路径非 UTF-8")?;
     let mut spotter = KeywordSpotter::new(dir, &format!("{dir}/keywords.txt"))?;
     let mut vad = Vad::new(&root.join("../models/silero_vad.onnx").to_string_lossy())?;
+    let asr = Recognizer::new(
+        &root
+            .join("../models/sense-voice.int8.onnx")
+            .to_string_lossy(),
+        &root
+            .join("../models/sense-voice-tokens.txt")
+            .to_string_lossy(),
+    )?;
 
     let host = cpal::default_host();
     let device = host
@@ -75,7 +84,7 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     stream.play()?;
     tracing::info!("voice engine: listening for wake word");
 
-    consume(bus, &mut spotter, &mut vad, rx);
+    consume(bus, &mut spotter, &mut vad, &asr, rx);
     Ok(())
 }
 
@@ -153,7 +162,13 @@ enum State {
 }
 
 /// 引擎常驻线程：状态机分发 0.1s 块——IDLE 喂 KWS，LISTENING 喂 VAD。
-fn consume(bus: EventBus, spotter: &mut KeywordSpotter, vad: &mut Vad, rx: Receiver<Vec<f32>>) {
+fn consume(
+    bus: EventBus,
+    spotter: &mut KeywordSpotter,
+    vad: &mut Vad,
+    asr: &Recognizer,
+    rx: Receiver<Vec<f32>>,
+) {
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
     // VAD 侧对齐缓冲：0.1s 块（1600）非 512 倍数，攒到 4×512 再喂
     let mut vad_buf: Vec<f32> = Vec::new();
@@ -205,8 +220,22 @@ fn consume(bus: EventBus, spotter: &mut KeywordSpotter, vad: &mut Vad, rx: Recei
                             "listening probe"
                         );
                     }
-                    if let Some(duration_ms) = drain_vad_segment(vad) {
+                    if let Some(seg) = drain_vad_segment(vad) {
+                        let duration_ms = seg.samples.len() as u64 / 16;
                         publish_utterance(&bus, duration_ms);
+                        // 本地转写（阻塞 ~0.5s；期间采集通道缓冲，唤醒容忍漏听，见 mod.rs）
+                        let t0 = Instant::now();
+                        match asr.transcribe(&seg.samples) {
+                            Ok(text) => {
+                                tracing::info!(
+                                    elapsed_ms = t0.elapsed().as_millis(),
+                                    text = %text,
+                                    "asr transcript"
+                                );
+                                publish_transcript(&bus, &text, duration_ms);
+                            }
+                            Err(e) => tracing::error!("asr failed: {e:#}"),
+                        }
                         state = State::Idle;
                     } else if since.elapsed() >= MAX_LISTENING {
                         // 兜底：说了唤醒词但一直没说话（或 VAD 漏检），别永远占着 LISTENING
@@ -230,18 +259,17 @@ fn feed_vad(vad: &mut Vad, vad_buf: &mut Vec<f32>, chunk: &[f32]) {
 }
 
 /// VAD 出段则取时长（ms）并清空队列；音频本体留给 M1-3.4 ASR 消费
-fn drain_vad_segment(vad: &mut Vad) -> Option<u64> {
+fn drain_vad_segment(vad: &mut Vad) -> Option<SpeechSegment> {
     let seg = vad.pop_segment()?;
     tracing::info!(
         start = seg.start,
         n = seg.samples.len(),
         "vad segment, utterance ended"
     );
-    let duration_ms = seg.samples.len() as u64 / 16;
     while vad.pop_segment().is_some() {
-        // 一次只取一句；异常多段（max_speech 切分）直接丢弃
+        // 一次只取一句；异常多段（max_speech 切分）一并清掉
     }
-    Some(duration_ms)
+    Some(seg)
 }
 
 fn publish_utterance(bus: &EventBus, duration_ms: u64) {
@@ -251,6 +279,17 @@ fn publish_utterance(bus: &EventBus, duration_ms: u64) {
         serde_json::json!({ "duration_ms": duration_ms }),
     );
     event.privacy_tier = PrivacyTier::Minimal;
+    bus.publish(event);
+}
+
+/// 转写结果事件：文本是语音内容本体，比时长敏感——隐私档 Balanced（默认档）
+fn publish_transcript(bus: &EventBus, text: &str, duration_ms: u64) {
+    let mut event = bus.event(
+        EventSource::Voice,
+        EventKind::TranscriptReady,
+        serde_json::json!({ "text": text, "duration_ms": duration_ms }),
+    );
+    event.privacy_tier = PrivacyTier::Balanced;
     bus.publish(event);
 }
 

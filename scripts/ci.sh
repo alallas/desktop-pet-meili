@@ -22,7 +22,10 @@ echo "== [5/6] IPC 生成物新鲜度 =="
 # bindings_fresh 测试内已覆盖（改了 ipc.rs 忘重新生成会红），这里随 [3/6] 跑过
 echo "（含于 cargo test: tests::bindings_fresh）"
 
-echo "== [6/6] 许可证白名单 =="
-python scripts/check-licenses.py
+echo "== [6/6] 许可证 + 漏洞库 =="
+# Rust 侧：cargo-deny 官方二进制（坑 26：走本机代理下载的预编译包）
+(cd src-tauri && ../tools/cargo-deny-bin/*/cargo-deny.exe check)
+# npm 侧：自研脚本（cargo-deny 不覆盖 node_modules）
+python scripts/check-licenses.py npm
 
 echo "全部通过。"

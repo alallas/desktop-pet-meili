@@ -20,6 +20,15 @@
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export PATH="$HOME/.cargo/bin:$PROJECT_ROOT/tools/m2w64-gcc/Library/mingw-w64/bin:$PROJECT_ROOT/tools/m2w64/Library/mingw-w64/bin:$PATH"
+
+# 本机有常驻代理（Clash Verge，127.0.0.1:7897，实测 github.com 200）。
+# 凡走 GitHub/海外源的下载（tauri 打包器拉 NSIS、cargo install 的 git 依赖等）
+# 需要代理；国内镜像走代理反而慢/不通，列进 NO_PROXY。
+if netstat -an | grep -q "127.0.0.1:7897.*LISTENING"; then
+  export HTTPS_PROXY="http://127.0.0.1:7897"
+  export HTTP_PROXY="http://127.0.0.1:7897"
+  export NO_PROXY="localhost,127.0.0.1,.tsinghua.edu.cn,.ustc.edu.cn,.nju.edu.cn,.sjtu.edu.cn,.aliyun.com,.tencent.com,.huaweicloud.com,.bfsu.edu.cn,modelscope.cn,mirrors.cloud.tencent.com"
+fi
 export C_INCLUDE_PATH="$PROJECT_ROOT/tools/m2w64-headers/Library/mingw-w64/x86_64-w64-mingw32/include:$PROJECT_ROOT/tools/m2w64-winpthreads/Library/mingw-w64/x86_64-w64-mingw32/include${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
 
 echo "dev-shell ready. cargo: $(command -v cargo || echo MISSING), windres: $(command -v windres || echo MISSING)"

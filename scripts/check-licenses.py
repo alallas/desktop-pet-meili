@@ -103,8 +103,11 @@ def check_npm() -> None:
 
 
 def main() -> int:
-    check_rust()
-    check_npm()
+    scope = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if scope in ("all", "rust"):
+        check_rust()
+    if scope in ("all", "npm"):
+        check_npm()
     if problems:
         print(f"许可证检查未过（{len(problems)} 项）：")
         for p in problems:

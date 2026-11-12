@@ -1,0 +1,34 @@
+# cargo-deny 配置（工程规范 §6 / 架构 §9.1 检查点 3）
+# 二进制：tools/cargo-deny-bin（预编译，GitHub 走本机代理下载，坑 26）
+
+[licenses]
+# 白名单口径同 check-licenses.py：宽松系放行；MPL-2.0 为 Tauri 生态不可避免的
+# 弱传染（文件级，与闭源分发兼容），经确认豁免
+allow = [
+    "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause", "BSD-3-Clause", "ISC", "CC0-1.0", "Zlib",
+    "Unicode-DFS-2016", "Unicode-3.0", "0BSD", "Unlicense",
+    "MPL-2.0",
+]
+private = { ignore = false }
+
+[bans]
+# M1 不启用重复依赖禁令（历史遗留多版本共存正常），只留默认
+
+[advisories]
+# 漏洞库：默认从 GitHub 拉 RustSec advisory DB（本机代理可用，坑 26）
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2024-0436：paste 停止维护——tauri-specta 的传递依赖，无安全漏洞，
+    # 上游换 pastey 之前只能豁免
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2024-0370：proc-macro-error 停止维护——传递依赖（宏工具链），
+    # 无安全漏洞，上游未提供替换前只能豁免
+    "RUSTSEC-2024-0370",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

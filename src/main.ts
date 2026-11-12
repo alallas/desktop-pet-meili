@@ -167,21 +167,10 @@ function tick() {
 async function refresh() {
   const pos = await win.outerPosition();
   const size = await win.outerSize();
-  const canvasEl = renderer.domElement;
-  const dbgRect = debug.getBoundingClientRect();
   const info = [
-    `潮间带 M0-2：Three.js 桌宠验证`,
-    `FPS: ${fps}  三角形: ${renderer.info.render.triangles}  模型包围盒: ${bboxInfo}`,
-    `动画: ${current}（1 Idle / 2 Walking / 3 Dance / 4 Wave）`,
-    `光标: ${cursorScreen ? `${Math.round(cursorScreen[0])}, ${Math.round(cursorScreen[1])}` : "?"}`,
-    `锚点: ${petAnchor.position.x.toFixed(2)}, ${petAnchor.position.y.toFixed(2)}  相机: z=${camera.position.z} aspect=${camera.aspect.toFixed(2)}`,
-    `锚点屏幕px: ${(() => { const v = petAnchor.position.clone(); v.y += PET_HEIGHT / 2; v.project(camera); return `${Math.round((v.x + 1) / 2 * innerWidth)}, ${Math.round((1 - v.y) / 2 * innerHeight)}`; })()}`,
-    `视口CSS: ${innerWidth}x${innerHeight} @${devicePixelRatio}x`,
-    `画布CSS: ${canvasEl.style.width}x${canvasEl.style.height} 缓冲: ${canvasEl.width}x${canvasEl.height}`,
-    `面板矩形: ${Math.round(dbgRect.left)},${Math.round(dbgRect.top)} ${Math.round(dbgRect.width)}x${Math.round(dbgRect.height)}`,
-    `窗口: ${size.width}x${size.height} @ (${pos.x}, ${pos.y})  穿透: ${clickThrough}`,
-    ``,
-    `T 切换点击穿透 | M 事件监视器 | Q 退出`,
+    `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}`,
+    `窗口 ${size.width}×${size.height} @(${pos.x},${pos.y})  穿透:${clickThrough}`,
+    `T穿透 M监视 Q退出`,
   ];
   debug.textContent = info.join("\n");
   invoke("debug_log", { msg: info.join(" | ") }).catch(() => {});

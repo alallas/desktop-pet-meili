@@ -44,10 +44,12 @@ export type EventKind =
 /**  网络连通性变化（有无可上网网关的网卡）。payload: {connected} */
 "NetworkChanged" | 
 /**  锁屏/解锁。payload: {locked} */
-"LockStateChanged";
+"LockStateChanged" | 
+/**  媒体播放变化（SMTC：状态/曲目/歌手）。payload: {app, title, artist, state} */
+"MediaPlaybackChanged";
 
 /**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
-export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Test";
+export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Media" | "Test";
 
 /**  事件总线对外流（Rust→WebView，事件监视器调试页订阅） */
 export type EventStream = StdEvent;

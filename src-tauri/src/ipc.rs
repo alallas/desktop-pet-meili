@@ -29,6 +29,7 @@ pub enum EventSource {
     Power,            // 电源状态（GetSystemPowerStatus 1Hz 轮询）
     Network,          // 网络连通性（NotifyAddrChange 事件 + 网关探测）
     Session,          // 会话状态（WTS 锁屏/解锁事件）
+    Media,            // SMTC 媒体会话（WinRT，"你在听/看什么"双通道之一）
     Test,
 }
 
@@ -54,6 +55,8 @@ pub enum EventKind {
     NetworkChanged,
     /// 锁屏/解锁。payload: {locked}
     LockStateChanged,
+    /// 媒体播放变化（SMTC：状态/曲目/歌手）。payload: {app, title, artist, state}
+    MediaPlaybackChanged,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式

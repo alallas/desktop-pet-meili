@@ -346,6 +346,7 @@ dependencies = [
  "tauri-specta",
  "thiserror 1.0.69",
  "tracing",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

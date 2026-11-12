@@ -11,6 +11,7 @@ use tauri::AppHandle;
 use crate::event_bus::EventBus;
 
 pub mod idle;
+pub mod media;
 pub mod mouse;
 pub mod network;
 pub mod power;
@@ -35,6 +36,7 @@ pub fn start_all(app: AppHandle) {
         Box::new(power::PowerCollector),
         Box::new(network::NetworkCollector),
         Box::new(session::SessionCollector),
+        Box::new(media::MediaCollector),
     ];
     for c in collectors {
         match c.start(bus.clone()) {

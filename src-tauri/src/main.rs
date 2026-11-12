@@ -37,6 +37,17 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
 }
 
 fn main() {
+    // tracing 落盘：桌面 exe 无控制台，不初始化 collector/语音引擎的日志全丢。
+    // 每次启动追加 %TEMP%\chaojiandai-rust.log（与前端状态日志分文件，职责不同）。
+    tracing_subscriber::fmt()
+        .with_writer(|| -> std::fs::File {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(std::env::temp_dir().join("chaojiandai-rust.log"))
+                .expect("open rust log")
+        })
+        .init();
     let builder = specta_builder();
     export_typescript_bindings(&builder);
     // 返回的闭包自持 Arc（'static），builder 本体随后 move 进 setup 挂事件
@@ -63,6 +74,8 @@ fn main() {
             // M1-2：系统层事件采集（前台窗口钩子 + 空闲轮询），统一投事件总线；
             // 其余采集器（鼠标/SMTC/电源/网络/锁屏）后续按提交增量接入 start_all。
             event_collector::start_all(app.handle().clone());
+            // M1-3.2：语音引擎（麦克风 → KWS 唤醒 → WakeWord 事件），常驻线程
+            voice::engine::start(crate::event_bus::EventBus::new(app.handle().clone()));
             // M1-1：事件通道样例——启动完成事件（ping-pong 的另一半在前端 listen）。
             // 延迟 1s 发射：setup 阶段 WebView 尚未加载，立即发会被错过（事件不排队）。
             builder.mount_events(app);

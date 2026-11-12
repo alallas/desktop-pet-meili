@@ -36,6 +36,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",                  # NotifyAddrChange 按项门控
 ] }
 tracing = "0.1"
+# tracing 落盘（桌面 exe 无控制台，不初始化 collector 的 info!/error! 全丢）
+tracing-subscriber = "0.3"
+# 麦克风采集（KWS/VAD 的音频源）。WASAPI 后端，MIT/Apache-2.0（白名单内）
+cpal = "0.15"
 # WinRT（SMTC 媒体会话等）。版本与 wry 带入的 0.62.2 对齐共用；windows-sys 管 Win32，本 crate 管 WinRT
 windows = { version = "0.62", features = ["Media_Control", "Foundation"] }
 specta = { version = "2.0.0-rc.28", features = ["serde_json"] }

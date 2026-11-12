@@ -30,6 +30,7 @@ pub enum EventSource {
     Network,          // 网络连通性（NotifyAddrChange 事件 + 网关探测）
     Session,          // 会话状态（WTS 锁屏/解锁事件）
     Media,            // SMTC 媒体会话（WinRT，"你在听/看什么"双通道之一）
+    Voice,            // 语音管线（本地 KWS/VAD 处理，唤醒事件本体不外流）
     Test,
 }
 
@@ -57,6 +58,8 @@ pub enum EventKind {
     LockStateChanged,
     /// 媒体播放变化（SMTC：状态/曲目/歌手）。payload: {app, title, artist, state}
     MediaPlaybackChanged,
+    /// 唤醒词命中（本地 KWS，音频不出本机）。payload: {keyword}
+    WakeWord,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式

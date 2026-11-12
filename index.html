@@ -15,6 +15,9 @@
         font-family: "Microsoft YaHei", sans-serif;
       }
       #debug {
+        /* 默认隐藏不挡工作区；状态验证走 %TEMP%\chaojiandai-debug.log（refresh() 每 0.5s 落盘），
+           事件流验证按 M 开事件监视器 */
+        display: none;
         position: absolute;
         left: 6px;
         bottom: 44px; /* 任务栏上方一点，彻底避开工作区 */

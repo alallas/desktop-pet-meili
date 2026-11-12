@@ -227,14 +227,19 @@ type StreamEvent = { ts: number; source: string; kind: string; payload: unknown 
 const eventLog: StreamEvent[] = [];
 
 function renderMonitor() {
-  // 连续重复（拖动/前台动画的 LOCATIONCHANGE 洪峰）折叠为一条 + 计数，只看变化
+  // 折叠策略：拖动/动画的连续事件只留最新一条 + 计数。
+  // ForegroundMoved 按 app 折叠（rect 抖动不算新信息）；其余按完整 payload 折叠。
   const folded: string[] = [];
   let runKey = "";
   let runCount = 0;
   for (const e of eventLog) {
     const t = new Date(e.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
     const line = `${t}  ${e.source}/${e.kind}  ${JSON.stringify(e.payload)}`;
-    const key = `${e.source}/${e.kind} ${JSON.stringify(e.payload)}`;
+    const payload = e.payload as { app?: string };
+    const key =
+      e.kind === "ForegroundMoved"
+        ? `${e.source}/${e.kind} ${payload.app ?? ""}`
+        : `${e.source}/${e.kind} ${JSON.stringify(e.payload)}`;
     if (key === runKey) {
       runCount++;
       folded[folded.length - 1] = `${line} ×${runCount + 1}`;
@@ -248,11 +253,21 @@ function renderMonitor() {
   monitor.scrollTop = monitor.scrollHeight;
 }
 
+// 渲染节流：事件洪峰（前台窗口动画）下最多 400ms 刷一帧，不闪屏
+let monitorRenderTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleMonitorRender() {
+  if (monitorRenderTimer) return;
+  monitorRenderTimer = setTimeout(() => {
+    monitorRenderTimer = null;
+    renderMonitor();
+  }, 400);
+}
+
 void events.eventStream.listen((e) => {
   const s = e.payload;
   eventLog.push({ ts: s.ts, source: String(s.source), kind: String(s.kind), payload: s.payload });
   if (eventLog.length > 200) eventLog.splice(0, eventLog.length - 200);
-  if (monitor.style.display !== "none") renderMonitor();
+  if (monitor.style.display !== "none") scheduleMonitorRender();
 });
 
 document.addEventListener("keydown", (e) => {

@@ -228,22 +228,34 @@ void events.booted.listen((e) => {
 // 贯穿 M1 全部阶段的调试工具：采集器对不对，看它最直接。
 const monitor = document.createElement("pre");
 monitor.style.cssText =
-  "position:fixed;left:8px;top:8px;width:560px;max-height:70vh;overflow-y:auto;margin:0;" +
-  "padding:8px;background:rgba(0,0,0,.72);color:#9fe8c0;font:11px/1.5 monospace;" +
-  "pointer-events:none;white-space:pre-wrap;word-break:break-all;display:none;z-index:99";
+  "position:fixed;left:8px;top:8px;width:380px;max-height:32vh;overflow-y:auto;margin:0;" +
+  "padding:5px 7px;background:rgba(0,0,0,.6);color:#9fe8c0;font:10px/1.4 monospace;" +
+  "pointer-events:none;white-space:pre-wrap;word-break:break-all;display:none;z-index:99;" +
+  "border-radius:6px";
 document.body.appendChild(monitor);
 
 type StreamEvent = { ts: number; source: string; kind: string; payload: unknown };
 const eventLog: StreamEvent[] = [];
 
 function renderMonitor() {
-  monitor.textContent = eventLog
-    .slice(-30)
-    .map((e) => {
-      const t = new Date(e.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
-      return `${t}  ${e.source}/${e.kind}  ${JSON.stringify(e.payload)}`;
-    })
-    .join("\n");
+  // 连续重复（拖动/前台动画的 LOCATIONCHANGE 洪峰）折叠为一条 + 计数，只看变化
+  const folded: string[] = [];
+  let runKey = "";
+  let runCount = 0;
+  for (const e of eventLog) {
+    const t = new Date(e.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+    const line = `${t}  ${e.source}/${e.kind}  ${JSON.stringify(e.payload)}`;
+    const key = `${e.source}/${e.kind} ${JSON.stringify(e.payload)}`;
+    if (key === runKey) {
+      runCount++;
+      folded[folded.length - 1] = `${line} ×${runCount + 1}`;
+    } else {
+      runKey = key;
+      runCount = 0;
+      folded.push(line);
+    }
+  }
+  monitor.textContent = folded.slice(-12).join("\n");
   monitor.scrollTop = monitor.scrollHeight;
 }
 

@@ -10,3 +10,4 @@
 
 pub mod engine;
 pub mod kws;
+pub mod vad;

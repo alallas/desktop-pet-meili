@@ -1,4 +1,5 @@
-//! 语音常驻引擎（M1-3.2）：麦克风采集（cpal）→ 重采样 16k → KWS 唤醒 → 事件总线。
+//! 语音常驻引擎（M1-3.2/3.3）：麦克风采集（cpal）→ 重采样 16k →
+//! 状态机（IDLE: KWS 常听唤醒 / LISTENING: VAD 断句采指令）→ 事件总线。
 //!
 //! 线程模型：一条常驻线程持 KWS 引擎；cpal 采集回调只把采样 push 进有界通道
 //! （满则丢块，KWS 容忍少量丢帧），解码全在常驻线程做（与采集器"回调只翻译、
@@ -18,6 +19,7 @@ use crate::event_bus::EventBus;
 use crate::ipc::{EventKind, EventSource, PrivacyTier};
 
 use super::kws::KeywordSpotter;
+use super::vad::Vad;
 
 /// 喂给 KWS 的块大小（0.1s @16k；M0 Python demo 用 0.2s，流式减半降低命中延迟）
 const CHUNK_SAMPLES: usize = 1600;
@@ -25,6 +27,8 @@ const CHUNK_SAMPLES: usize = 1600;
 const WAKE_COOLDOWN: Duration = Duration::from_millis(1500);
 /// 采集回调 → 引擎线程的缓冲块数（0.1s/块；20 块 = 2s，背压上限）
 const CHANNEL_BLOCKS: usize = 20;
+/// LISTENING 态超时：唤醒后一直不说话/VAD 漏检，超时回 IDLE 重新常听
+const MAX_LISTENING: Duration = Duration::from_secs(12);
 
 /// 启动语音引擎（装配层唯一入口，进程常驻）。失败只记日志不 panic——
 /// 无麦克风的环境桌宠其余功能不受影响（装配层不重试）。
@@ -41,6 +45,7 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let model_dir = root.join("../models/kws");
     let dir = model_dir.to_str().ok_or("模型路径非 UTF-8")?;
     let mut spotter = KeywordSpotter::new(dir, &format!("{dir}/keywords.txt"))?;
+    let mut vad = Vad::new(&root.join("../models/silero_vad.onnx").to_string_lossy())?;
 
     let host = cpal::default_host();
     let device = host
@@ -70,7 +75,7 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     stream.play()?;
     tracing::info!("voice engine: listening for wake word");
 
-    consume(bus, &mut spotter, rx);
+    consume(bus, &mut spotter, &mut vad, rx);
     Ok(())
 }
 
@@ -107,11 +112,21 @@ where
     )
 }
 
-/// 引擎常驻线程：攒 0.1s 块喂 KWS，命中 → 冷却 → WakeWord 事件。
-fn consume(bus: EventBus, spotter: &mut KeywordSpotter, rx: Receiver<Vec<f32>>) {
+/// 引擎状态机（M1-3.3）：IDLE 常听唤醒词；命中 → LISTENING 采指令语音，
+/// VAD 断句出段 → UtteranceEnded 事件 → 回 IDLE。
+enum State {
+    Idle,
+    Listening { since: Instant },
+}
+
+/// 引擎常驻线程：状态机分发 0.1s 块——IDLE 喂 KWS，LISTENING 喂 VAD。
+fn consume(bus: EventBus, spotter: &mut KeywordSpotter, vad: &mut Vad, rx: Receiver<Vec<f32>>) {
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
+    // VAD 侧对齐缓冲：0.1s 块（1600）非 512 倍数，攒到 4×512 再喂
+    let mut vad_buf: Vec<f32> = Vec::new();
     // 初始即允许首次命中（now() - cooldown）
     let mut last_wake = Instant::now() - WAKE_COOLDOWN;
+    let mut state = State::Idle;
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(chunk) => buf.extend_from_slice(&chunk),
@@ -120,21 +135,79 @@ fn consume(bus: EventBus, spotter: &mut KeywordSpotter, rx: Receiver<Vec<f32>>) 
         }
         while buf.len() >= CHUNK_SAMPLES {
             let chunk: Vec<f32> = buf.drain(..CHUNK_SAMPLES).collect();
-            if let Some(hit) = spotter.accept_waveform(&chunk) {
-                if last_wake.elapsed() >= WAKE_COOLDOWN {
-                    last_wake = Instant::now();
-                    let mut event = bus.event(
-                        EventSource::Voice,
-                        EventKind::WakeWord,
-                        serde_json::json!({ "keyword": hit.keyword }),
-                    );
-                    // 唤醒事件本体不含语音内容且全程本地处理：隐私档 Minimal
-                    event.privacy_tier = PrivacyTier::Minimal;
-                    bus.publish(event);
+            match state {
+                State::Idle => {
+                    if let Some(hit) = spotter.accept_waveform(&chunk) {
+                        if last_wake.elapsed() >= WAKE_COOLDOWN {
+                            last_wake = Instant::now();
+                            let mut event = bus.event(
+                                EventSource::Voice,
+                                EventKind::WakeWord,
+                                serde_json::json!({ "keyword": hit.keyword }),
+                            );
+                            // 唤醒事件本体不含语音内容且全程本地处理：隐私档 Minimal
+                            event.privacy_tier = PrivacyTier::Minimal;
+                            bus.publish(event);
+                            // 命中块尾部（唤醒词收音）也进 VAD：min_speech 会滤掉过短残渣
+                            vad.reset();
+                            vad_buf.clear();
+                            tracing::info!("wake hit, entering listening");
+                            state = State::Listening {
+                                since: Instant::now(),
+                            };
+                            feed_vad(vad, &mut vad_buf, &chunk);
+                        }
+                    }
+                }
+                State::Listening { since } => {
+                    feed_vad(vad, &mut vad_buf, &chunk);
+                    if let Some(duration_ms) = drain_vad_segment(vad) {
+                        publish_utterance(&bus, duration_ms);
+                        state = State::Idle;
+                    } else if since.elapsed() >= MAX_LISTENING {
+                        // 兜底：说了唤醒词但一直没说话（或 VAD 漏检），别永远占着 LISTENING
+                        tracing::info!("listening timeout, back to idle");
+                        state = State::Idle;
+                    }
                 }
             }
         }
     }
+}
+
+/// 把 0.1s 块喂进 VAD（内部先攒到 512 的整数倍）
+fn feed_vad(vad: &mut Vad, vad_buf: &mut Vec<f32>, chunk: &[f32]) {
+    const VAD_FEED: usize = 512 * 4; // 2048 采样 = 0.128s，512 对齐且不过度拖延断句
+    vad_buf.extend_from_slice(chunk);
+    while vad_buf.len() >= VAD_FEED {
+        let feed: Vec<f32> = vad_buf.drain(..VAD_FEED).collect();
+        vad.accept_waveform(&feed);
+    }
+}
+
+/// VAD 出段则取时长（ms）并清空队列；音频本体留给 M1-3.4 ASR 消费
+fn drain_vad_segment(vad: &mut Vad) -> Option<u64> {
+    let seg = vad.pop_segment()?;
+    tracing::info!(
+        start = seg.start,
+        n = seg.samples.len(),
+        "vad segment, utterance ended"
+    );
+    let duration_ms = seg.samples.len() as u64 / 16;
+    while vad.pop_segment().is_some() {
+        // 一次只取一句；异常多段（max_speech 切分）直接丢弃
+    }
+    Some(duration_ms)
+}
+
+fn publish_utterance(bus: &EventBus, duration_ms: u64) {
+    let mut event = bus.event(
+        EventSource::Voice,
+        EventKind::UtteranceEnded,
+        serde_json::json!({ "duration_ms": duration_ms }),
+    );
+    event.privacy_tier = PrivacyTier::Minimal;
+    bus.publish(event);
 }
 
 /// 线性插值重采样器（设备原生率 → 16k）。

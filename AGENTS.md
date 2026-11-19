@@ -14,6 +14,7 @@ cd src-tauri && cargo build    # 编译（禁止全量 clean，缓存很贵）
 ```
 
 - 运行 exe：用 PowerShell `Start-Process`（Git Bash 直接执行会 Exec format error，原因见踩坑档案坑 8）
+- 重建 exe 前必须杀进程（exe 文件锁，坑 38）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/kill-dev.ps1`——铁律顺序 chaojiandai → llama-server → webview2(命令行含 chaojiandai) → python(仅命令行含 tts_sidecar)；**禁止内联 PowerShell 用 `$_`**（MSYS 路径转换会污染变量，坑 40）
 - 验证窗口：`scripts/check-window.ps1`
 - 定位 build 脚本 panic：catch_unwind 写文件法（踩坑档案坑 10）
 

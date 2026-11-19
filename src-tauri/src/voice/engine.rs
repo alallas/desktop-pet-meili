@@ -242,6 +242,8 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
     let mut last_wake = Instant::now() - WAKE_COOLDOWN;
     // 空唤醒抑制截止戳：None = 未抑制（初始不抑制，避免启动后 30s 不应期）
     let mut suppress_until: Option<Instant> = None;
+    // SMTC 媒体播放标志的上一帧值（只记状态翻转，不每块刷日志）
+    let mut last_media_playing = false;
     let mut state = State::Idle;
     let mut meter = LevelMeter::new();
     loop {
@@ -254,8 +256,28 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
             let chunk: Vec<f32> = buf.drain(..CHUNK_SAMPLES).collect();
             match state {
                 State::Idle | State::Speaking => {
-                    let suppressed = suppress_until.is_some_and(|t| Instant::now() < t);
-                    if let Some(hit) = spotter.accept_waveform(&chunk) {
+                    // SMTC 闸门：系统正在放歌/放视频时暂停喂 KWS——音响外放对麦克风
+                    // 是持续回声源，歌词谐音会打爆唤醒（2026-11-19 实测 20+ 命中/2min，
+                    // 三重门只挡得住回话，挡不住每 40s 一声叮）。放歌时她不该偷听，
+                    // 该跳舞（产品设定，M2 行为引擎）。SPEAKING 态不抑制：barge-in
+                    // 打断需要 KWS 常听（待办 #11）。
+                    let media_playing = crate::event_collector::media::is_media_playing();
+                    if media_playing != last_media_playing {
+                        last_media_playing = media_playing;
+                        tracing::info!(
+                            "wake gate: media {} kws {}",
+                            if media_playing { "playing" } else { "stopped" },
+                            if media_playing { "paused" } else { "resumed" }
+                        );
+                    }
+                    let suppressed =
+                        suppress_until.is_some_and(|t| Instant::now() < t) || media_playing;
+                    let hit = if media_playing {
+                        None
+                    } else {
+                        spotter.accept_waveform(&chunk)
+                    };
+                    if let Some(hit) = hit {
                         let rms = chunk_rms(&chunk);
                         if rms < WAKE_MIN_RMS {
                             // 噪声误唤醒：RMS 低于真人喊话下限，吃掉命中并安静 1.5s

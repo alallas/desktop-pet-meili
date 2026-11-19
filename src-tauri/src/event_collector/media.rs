@@ -5,6 +5,7 @@
 //! - 事件：当前会话切换 / 播放状态变化 / 曲目信息变化，三者都重新读取并发布；
 //! - 缩略图（专辑封面）留给 M1-5 感知管道，这里只要元数据（隐私三档里的 Minimal 线）。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Foundation::TypedEventHandler;
@@ -45,6 +46,15 @@ fn block_on<F: std::future::IntoFuture>(fut: F) -> F::Output {
 static BUS: OnceLock<EventBus> = OnceLock::new();
 /// 当前媒体会话（WinRT 对象要求保持在存活，事件注册才不会失效）
 static SESSION: Mutex<Option<GlobalSystemMediaTransportControlsSession>> = Mutex::new(None);
+/// "系统正在放音频"标志：SMTC Playing 置位，其余清除。语音引擎据此抑制唤醒——
+/// 音响外放对麦克风是持续回声源，歌词谐音会打爆 KWS（2026-11-19 实测 20+ 命中/2min）；
+/// 不走事件总线是因为引擎常驻线程轮询比挂监听器简单，且允许引擎"查询式"降级
+static PLAYING: AtomicBool = AtomicBool::new(false);
+
+/// 供语音引擎等模块查询：系统当前是否有媒体在播放
+pub fn is_media_playing() -> bool {
+    PLAYING.load(Ordering::Relaxed)
+}
 
 pub struct MediaCollector;
 
@@ -105,6 +115,7 @@ fn set_session(session: Option<GlobalSystemMediaTransportControlsSession>) {
         if let Some(s) = guard.clone() {
             publish(&s);
         } else {
+            PLAYING.store(false, Ordering::Relaxed);
             // 无会话也报一次（"音乐停了"本身是信息，且证明采集器活着）
             if let Some(bus) = BUS.get() {
                 bus.publish(bus.event(
@@ -132,6 +143,7 @@ fn publish(session: &GlobalSystemMediaTransportControlsSession) {
         GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused => "paused",
         _ => "stopped",
     };
+    PLAYING.store(state == "playing", Ordering::Relaxed);
     // 曲目信息异步获取；个别会话会失败（无媒体属性），降级为空串
     let (title, artist) = session
         .TryGetMediaPropertiesAsync()

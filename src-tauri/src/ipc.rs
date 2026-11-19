@@ -68,6 +68,9 @@ pub enum EventKind {
     TranscriptReady,
     /// 思考层（本地 Qwen3-4B，人设 prompt 装配）回复完成。payload: {text, latency_ms}
     ReplyReady,
+    /// TTS 播放结束（自然播完或被唤醒打断）。payload: {barge_in}
+    /// 前端消费：收嘴、退出说话动画（M1-3.5b）
+    SpeakEnded,
 }
 
 /// 标准化事件：Rust→WebView 事件总线的唯一格式

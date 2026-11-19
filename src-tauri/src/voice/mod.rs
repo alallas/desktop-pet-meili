@@ -14,4 +14,7 @@
 pub mod asr;
 pub mod engine;
 pub mod kws;
+pub mod player;
+pub mod resample;
+pub mod tts;
 pub mod vad;

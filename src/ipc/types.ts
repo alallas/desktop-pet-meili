@@ -60,7 +60,12 @@ export type EventKind =
  */
 "TranscriptReady" | 
 /**  思考层（本地 Qwen3-4B，人设 prompt 装配）回复完成。payload: {text, latency_ms} */
-"ReplyReady";
+"ReplyReady" | 
+/**
+ *  TTS 播放结束（自然播完或被唤醒打断）。payload: {barge_in}
+ *  前端消费：收嘴、退出说话动画（M1-3.5b）
+ */
+"SpeakEnded";
 
 /**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
 export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Media" | "Voice" | "Test";

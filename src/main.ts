@@ -2,6 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { events } from "./ipc/client";
 
 const debug = document.getElementById("debug")!;
 const win = getCurrentWindow();
@@ -94,6 +95,37 @@ function play(name: AnimName) {
   current = name;
 }
 
+// ---------- 语音反馈（M1-3.5b）：唤醒 = 扭头挥手"我在听"，回复 = 说话起舞，播完收嘴 ----------
+// 事件流来自 Rust 语音引擎（WakeWord/ReplyReady/SpeakEnded），经 eventStream 到达。
+const USER_GAZE = new THREE.Vector3(0, 1.4, 4.4); // 相机后方 = 用户脸的方向
+let gazeOverrideUntil = 0; // performance.now() 截止戳；期间无视光标强制看向用户
+
+function lookAtUser(ms: number) {
+  gazeOverrideUntil = performance.now() + ms;
+}
+
+void events.eventStream.listen((e) => {
+  const s = e.payload;
+  if (s.kind === "WakeWord") {
+    // 被喊到：挥手 + 扭头看用户（喂 #21 的"不知道她在听"）
+    play("Wave");
+    lookAtUser(2500);
+  } else if (s.kind === "ReplyReady") {
+    // 开口回复：起舞（占位说话动画）+ 持续看着用户
+    play("Dance");
+    lookAtUser(8000);
+  } else if (s.kind === "SpeakEnded") {
+    const p = s.payload as { barge_in?: boolean };
+    if (p.barge_in) {
+      // 被打断：重新进入倾听，继续挥手
+      play("Wave");
+      lookAtUser(2500);
+    } else {
+      play("Idle");
+    }
+  }
+});
+
 // ---------- 光标跟随（点击穿透下轮询 Rust 侧全局光标）----------
 const cursorNDC = new THREE.Vector2(0, -0.5); // 默认看向下方（"坐着"的感觉）
 const cursorTarget = new THREE.Vector3(0, 0.6, 2);
@@ -119,18 +151,25 @@ const UP = new THREE.Vector3(0, 1, 0);
 
 function applyGaze() {
   if (!headBone) return;
-  // 光标 NDC → 面前固定深度处的世界坐标
-  cursorTarget.set(cursorNDC.x, cursorNDC.y, 0.5).unproject(camera);
+  // 注视目标：优先"看向用户"（被喊到/说话时），否则跟随光标
+  let target: THREE.Vector3;
+  if (performance.now() < gazeOverrideUntil) {
+    target = USER_GAZE;
+  } else {
+    // 光标 NDC → 面前固定深度处的世界坐标
+    cursorTarget.set(cursorNDC.x, cursorNDC.y, 0.5).unproject(camera);
+    target = cursorTarget;
+  }
 
   headBone.getWorldPosition(_headPos);
-  _dir.copy(cursorTarget).sub(_headPos);
+  _dir.copy(target).sub(_headPos);
 
   // 只追踪正面 150° 锥形范围，身后不扭头
   if (_dir.z < -0.2 * _dir.length()) return;
 
   // 记录动画姿态，与注视姿态插值混合（避免 IK 生硬）
   _animQ.copy(headBone.quaternion);
-  _m.lookAt(_headPos, cursorTarget, UP);
+  _m.lookAt(_headPos, target, UP);
   _lookQ.setFromRotationMatrix(_m);
   // lookAt 得到的是世界旋转，需换算到父空间
   const parent = headBone.parent!;
@@ -199,7 +238,7 @@ await refresh();
 // ---------- M1-1 IPC ping-pong 样例 ----------
 // Booted 事件（Rust→WebView）+ ping 命令（WebView→Rust）双通道验证。
 // 结果写 %TEMP%\chaojiandai-debug.log；M1-2 事件监视器调试页上线后移除本段。
-import { commands, events } from "./ipc/client";
+import { commands } from "./ipc/client";
 void events.booted.listen((e) => {
   void commands
     .debugLog(

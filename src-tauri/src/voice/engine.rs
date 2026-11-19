@@ -20,6 +20,9 @@ use crate::ipc::{EventKind, EventSource, PrivacyTier};
 
 use super::asr::Recognizer;
 use super::kws::KeywordSpotter;
+// 线性插值重采样器已泛化为任意率对（in→out）并移至 resample.rs：
+// 采集通路（设备率→16k）与 TTS 输出通路（24k→设备率）共用同一实现。
+use super::resample::Resampler;
 use super::vad::{SpeechSegment, Vad};
 
 /// 喂给 KWS 的块大小（0.1s @16k；M0 Python demo 用 0.2s，流式减半降低命中延迟）
@@ -92,8 +95,31 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None
         }
     };
+    // TTS（Kokoro sidecar 合成 + cpal 播放）：启动失败不致命——降级为静默回复
+    let mut tts = match super::tts::TtsSidecar::spawn() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!("tts sidecar unavailable, silent replies: {e:#}");
+            None
+        }
+    };
+    let mut player = match super::player::Player::new() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::error!("tts player unavailable, silent replies: {e:#}");
+            None
+        }
+    };
 
-    consume(bus, &mut spotter, &mut vad, &asr, thinker.as_mut(), rx);
+    let mut parts = EngineParts {
+        spotter: &mut spotter,
+        vad: &mut vad,
+        asr: &asr,
+        thinker: thinker.as_mut(),
+        tts: tts.as_mut(),
+        player: player.as_mut(),
+    };
+    consume(bus, &mut parts, rx);
     Ok(())
 }
 
@@ -109,7 +135,7 @@ where
     T: cpal::SizedSample, // build_input_stream 的硬约束；SizedSample: Sample 超trait
     f32: cpal::FromSample<T>, // from_sample 的转换目标约束
 {
-    let mut resampler = Resampler::new(in_rate);
+    let mut resampler = Resampler::new(in_rate, 16000.0);
     device.build_input_stream(
         config,
         move |data: &[T], _| {
@@ -163,22 +189,39 @@ impl LevelMeter {
     }
 }
 
-/// 引擎状态机（M1-3.3）：IDLE 常听唤醒词；命中 → LISTENING 采指令语音，
-/// VAD 断句出段 → UtteranceEnded 事件 → 回 IDLE。
+/// 引擎状态机（M1-3.3 → M1-3.5b）：
+/// - IDLE：KWS 常听唤醒词；命中 → LISTENING 采指令语音；
+/// - LISTENING：VAD 断句出段 → 本地 ASR 转写 → 本地思考层 → TTS 出声 → SPEAKING；
+/// - SPEAKING：KWS 继续听（打断 barge-in：命中 → 停播 → 回 LISTENING）；自然播完 → 回 IDLE。
+///
+/// 已知折衷（待办 #11）：播放中扬声器回声可能误触发 KWS，回声消除后续评估。
+#[derive(Clone, Copy)]
 enum State {
     Idle,
     Listening { since: Instant },
+    Speaking,
 }
 
-/// 引擎常驻线程：状态机分发 0.1s 块——IDLE 喂 KWS，LISTENING 喂 VAD。
-fn consume(
-    bus: EventBus,
-    spotter: &mut KeywordSpotter,
-    vad: &mut Vad,
-    asr: &Recognizer,
-    mut thinker: Option<&mut crate::llm::Thinker>,
-    rx: Receiver<Vec<f32>>,
-) {
+/// 引擎常驻线程的可变组件集合（consume 参数打包，避免长参数列表）
+struct EngineParts<'a> {
+    spotter: &'a mut KeywordSpotter,
+    vad: &'a mut Vad,
+    asr: &'a Recognizer,
+    thinker: Option<&'a mut crate::llm::Thinker>,
+    tts: Option<&'a mut super::tts::TtsSidecar>,
+    player: Option<&'a mut super::player::Player>,
+}
+
+/// 引擎常驻线程：状态机分发 0.1s 块——IDLE/SPEAKING 喂 KWS，LISTENING 喂 VAD。
+fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
+    let EngineParts {
+        spotter,
+        vad,
+        asr,
+        thinker,
+        tts,
+        player,
+    } = parts;
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
     // VAD 侧对齐缓冲：0.1s 块（1600）非 512 倍数，攒到 4×512 再喂
     let mut vad_buf: Vec<f32> = Vec::new();
@@ -195,10 +238,17 @@ fn consume(
         while buf.len() >= CHUNK_SAMPLES {
             let chunk: Vec<f32> = buf.drain(..CHUNK_SAMPLES).collect();
             match state {
-                State::Idle => {
+                State::Idle | State::Speaking => {
                     if let Some(hit) = spotter.accept_waveform(&chunk) {
                         if last_wake.elapsed() >= WAKE_COOLDOWN {
                             last_wake = Instant::now();
+                            // 打断（barge-in）：播放中命中唤醒词 → 停播并通知前端收嘴
+                            if matches!(state, State::Speaking) {
+                                if let Some(p) = player.as_deref_mut() {
+                                    p.stop();
+                                }
+                                publish_speak_ended(&bus, true);
+                            }
                             let mut event = bus.event(
                                 EventSource::Voice,
                                 EventKind::WakeWord,
@@ -215,6 +265,17 @@ fn consume(
                                 since: Instant::now(),
                             };
                             feed_vad(vad, &mut vad_buf, &chunk);
+                        }
+                    }
+                    // 播完检测：输出回调把"队列播空"翻成 !is_playing，这里接成事件
+                    if matches!(state, State::Speaking) {
+                        let finished = match player.as_deref_mut() {
+                            Some(p) => !p.is_playing(),
+                            None => true,
+                        };
+                        if finished {
+                            publish_speak_ended(&bus, false);
+                            state = State::Idle;
                         }
                     }
                 }
@@ -235,6 +296,7 @@ fn consume(
                         publish_utterance(&bus, duration_ms);
                         // 本地转写（阻塞 ~0.5s；期间采集通道缓冲，唤醒容忍漏听，见 mod.rs）
                         let t0 = Instant::now();
+                        let mut pending_speak: Option<String> = None;
                         match asr.transcribe(&seg.samples) {
                             Ok(text) => {
                                 tracing::info!(
@@ -260,11 +322,25 @@ fn consume(
                                         "llm reply"
                                     );
                                     publish_reply(&bus, &reply, t1.elapsed().as_millis());
+                                    pending_speak = Some(reply);
                                 }
                             }
                             Err(e) => tracing::error!("asr failed: {e:#}"),
                         }
-                        state = State::Idle;
+                        // TTS 出声（M1-3.5b）：合成+播放成功进 SPEAKING；失败降级静默回 IDLE
+                        state = match pending_speak {
+                            Some(text) => {
+                                match speak_reply(tts.as_deref_mut(), player.as_deref_mut(), &text)
+                                {
+                                    Ok(()) => State::Speaking,
+                                    Err(e) => {
+                                        tracing::error!("tts speak failed, silent reply: {e:#}");
+                                        State::Idle
+                                    }
+                                }
+                            }
+                            None => State::Idle,
+                        };
                     } else if since.elapsed() >= MAX_LISTENING {
                         // 兜底：说了唤醒词但一直没说话（或 VAD 漏检），别永远占着 LISTENING
                         tracing::info!("listening timeout, back to idle");
@@ -332,98 +408,39 @@ fn publish_reply(bus: &EventBus, text: &str, latency_ms: u128) {
     bus.publish(event);
 }
 
-/// 线性插值重采样器（设备原生率 → 16k）。
-///
-/// 相位连续：全局输出序号 `next_out` + 基址 `base`（carry[0] 的全局输入序号），
-/// 分块喂与整段喂结果逐采样一致（跨回调连续性有测试钉死）。
-/// 输入端本身就是 16k 时退化为直通（尾部留 1 采样延迟，可忽略）。
-struct Resampler {
-    ratio: f64,      // 输入率 / 16000
-    carry: Vec<f32>, // 未消费的尾部采样
-    base: u64,       // carry[0] 对应的全局输入采样序号
-    next_out: u64,   // 下一个输出序号（全局相位，跨回调连续）
+/// 合成 + 播放一句回复（M1-3.5b）。合成阻塞 ~1–3s（与 ASR/LLM 同级，引擎线程
+/// 容忍短暂漏听唤醒）；播放本身非阻塞（队列 + 输出回调，见 player.rs）。
+fn speak_reply(
+    tts: Option<&mut super::tts::TtsSidecar>,
+    player: Option<&mut super::player::Player>,
+    text: &str,
+) -> Result<(), String> {
+    let tts = tts.ok_or("tts sidecar 不可用")?;
+    let player = player.ok_or("tts player 不可用")?;
+    let t0 = Instant::now();
+    let path = tts.synth(text)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("读 wav 失败 {path:?}: {e}"))?;
+    player.play_wav(&bytes)?;
+    tracing::info!(elapsed_ms = t0.elapsed().as_millis(), "tts speak queued");
+    Ok(())
 }
 
-impl Resampler {
-    fn new(in_rate: f64) -> Self {
-        Self {
-            ratio: in_rate / 16000.0,
-            carry: Vec::new(),
-            base: 0,
-            next_out: 0,
-        }
-    }
-
-    /// 喂入一段单声道采样，返回本段可产出的 16k 采样。
-    fn push(&mut self, input: &[f32]) -> Vec<f32> {
-        self.carry.extend_from_slice(input);
-        let n = self.carry.len();
-        let mut out = Vec::new();
-        if n < 2 || self.ratio <= 0.0 {
-            return out;
-        }
-        loop {
-            // 第 next_out 个输出的全局输入位置；插值需要 pos 与 pos+1 两个采样都在 carry 内
-            let pos = self.next_out as f64 * self.ratio;
-            let idx_global = pos.floor() as u64;
-            let idx = idx_global.saturating_sub(self.base) as usize;
-            if idx + 1 >= n {
-                break;
-            }
-            let frac = (pos - idx_global as f64) as f32;
-            let a = self.carry[idx];
-            let b = self.carry[idx + 1];
-            out.push(a + (b - a) * frac);
-            self.next_out += 1;
-        }
-        // 消费到最后一个已用输入采样，之前的不再参与后续插值
-        if self.next_out > 0 {
-            let last_used = ((self.next_out - 1) as f64 * self.ratio).floor() as u64;
-            let drop = (last_used + 1 - self.base) as usize;
-            self.carry.drain(..drop);
-            self.base = last_used + 1;
-        }
-        out
-    }
+/// 播放结束事件（自然播完 barge_in=false / 被唤醒打断 barge_in=true）。
+/// 仅播放状态翻转，无内容：隐私档 Minimal。前端消费：收嘴、退出说话动画。
+fn publish_speak_ended(bus: &EventBus, barge_in: bool) {
+    let mut event = bus.event(
+        EventSource::Voice,
+        EventKind::SpeakEnded,
+        serde_json::json!({ "barge_in": barge_in }),
+    );
+    event.privacy_tier = PrivacyTier::Minimal;
+    bus.publish(event);
 }
 
+/// 线性插值重采样器（设备原生率 → 16k）已泛化为任意率对并移至 resample.rs
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 16k 直通：正弦一个周期（16 采样）原样通过，无增益无移位
-    #[test]
-    fn resample_passthrough_at_16k() {
-        let mut r = Resampler::new(16000.0);
-        let input: Vec<f32> = (0..16)
-            .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 16.0).sin() as f32)
-            .collect();
-        let out = r.push(&input);
-        assert_eq!(out.len(), 15); // 留 1 采样给下一次插值
-        for (a, b) in out.iter().zip(input.iter()) {
-            assert!((a - b).abs() < 1e-6, "16k 直通不应改变采样");
-        }
-    }
-
-    /// 48k → 16k 三分降采样：输出长度 = 输入/3，能量保持（正弦幅度不塌）
-    #[test]
-    fn resample_48k_to_16k() {
-        let mut r = Resampler::new(48000.0);
-        let input: Vec<f32> = (0..4800)
-            .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 4800.0 * 8.0).sin() as f32)
-            .collect();
-        let out = r.push(&input);
-        assert_eq!(
-            out.len(),
-            1600,
-            "48k 4800 采样（1s）应产出 1600（0.25s 音频）"
-        );
-        let peak = out.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
-        assert!(
-            peak > 0.9,
-            "8 周期正弦峰值应保留（线性插值不破幅度）: {peak}"
-        );
-    }
 
     /// LevelMeter：满幅正弦 1s 的 RMS ≈ 0.707，1s 未满不报
     #[test]
@@ -440,27 +457,5 @@ mod tests {
             (rms - 2.0_f64.sqrt() / 2.0).abs() < 0.01,
             "满幅正弦 RMS: {rms}"
         );
-    }
-
-    /// 跨回调相位连续：两块分别喂与合并喂，输出逐采样一致（base/next_out 工作正常）
-    #[test]
-    fn resample_across_callbacks() {
-        let full: Vec<f32> = (0..960).map(|i| i as f32 / 960.0).collect();
-        let (a, b) = full.split_at(480);
-        let mut r_split = Resampler::new(48000.0);
-        let out_split = {
-            let mut o = r_split.push(a);
-            o.extend(r_split.push(b));
-            o
-        };
-        let mut r_full = Resampler::new(48000.0);
-        let out_full = r_full.push(&full);
-        assert_eq!(out_full.len(), out_split.len(), "分块喂不应改变总输出长度");
-        for (i, (f, s)) in out_full.iter().zip(out_split.iter()).enumerate() {
-            assert!(
-                (f - s).abs() < 1e-4,
-                "第 {i} 个采样不一致: full={f} split={s}"
-            );
-        }
     }
 }

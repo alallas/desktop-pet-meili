@@ -53,7 +53,9 @@ function layoutPet() {
   const cx = PET_NDC.x * halfW;
   const cy = camera.position.y + PET_NDC.y * halfH; // 相机视线中心在 (0, 1.1, 0)
   petAnchor.position.set(cx, cy - PET_HEIGHT / 2, 0);
+  petBasePos.copy(petAnchor.position);
 }
+const petBasePos = new THREE.Vector3();
 
 new GLTFLoader().load("/models/RobotExpressive.glb", (gltf) => {
   const model = gltf.scene;
@@ -95,8 +97,9 @@ function play(name: AnimName) {
   current = name;
 }
 
-// ---------- 语音反馈（M1-3.5b）：唤醒 = 扭头挥手"我在听"，回复 = 说话起舞，播完收嘴 ----------
-// 事件流来自 Rust 语音引擎（WakeWord/ReplyReady/SpeakEnded），经 eventStream 到达。
+// ---------- 唤醒反馈（M1-3.5b 简化版）：跳一下 + "我在听"气泡 ----------
+// 占位模型动画表现力不足（Wave 未设 LoopOnce 会循环成"一直挥手"，且与 Idle 区分
+// 度低），测试期只保留"跳跃 + 气泡"一个明确信号；正式反馈等美丽 3D 形象（#16）。
 const USER_GAZE = new THREE.Vector3(0, 1.4, 4.4); // 相机后方 = 用户脸的方向
 let gazeOverrideUntil = 0; // performance.now() 截止戳；期间无视光标强制看向用户
 
@@ -104,25 +107,31 @@ function lookAtUser(ms: number) {
   gazeOverrideUntil = performance.now() + ms;
 }
 
+const bubble = document.createElement("div");
+bubble.textContent = "我在听~";
+bubble.style.cssText =
+  "position:fixed;display:none;padding:6px 12px;background:#fff;color:#333;" +
+  "border-radius:12px;font:14px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.25);" +
+  "transform:translate(-50%,-130%);white-space:nowrap;z-index:98;pointer-events:none";
+document.body.appendChild(bubble);
+
+let bubbleUntil = 0; // 气泡显示截止戳（与引擎 MAX_LISTENING 12s 对齐）
+let hopStart = Number.NEGATIVE_INFINITY; // 跳跃动画起点
+const HOP_MS = 450;
+const HOP_H = 0.22; // 跳跃高度（世界单位）
+
+function wakeCue() {
+  hopStart = performance.now();
+  bubbleUntil = performance.now() + 12000;
+  lookAtUser(2500);
+}
+
 void events.eventStream.listen((e) => {
   const s = e.payload;
   if (s.kind === "WakeWord") {
-    // 被喊到：挥手 + 扭头看用户（喂 #21 的"不知道她在听"）
-    play("Wave");
-    lookAtUser(2500);
-  } else if (s.kind === "ReplyReady") {
-    // 开口回复：起舞（占位说话动画）+ 持续看着用户
-    play("Dance");
-    lookAtUser(8000);
-  } else if (s.kind === "SpeakEnded") {
-    const p = s.payload as { barge_in?: boolean };
-    if (p.barge_in) {
-      // 被打断：重新进入倾听，继续挥手
-      play("Wave");
-      lookAtUser(2500);
-    } else {
-      play("Idle");
-    }
+    wakeCue();
+  } else if (s.kind === "TranscriptReady") {
+    bubbleUntil = 0; // 收到话了，气泡使命完成
   }
 });
 
@@ -142,6 +151,7 @@ async function pollCursor() {
 setInterval(pollCursor, 100);
 
 // ---------- 视线 IK：头部朝向光标，限制在正面锥形范围内 ----------
+const _v3 = new THREE.Vector3();
 const _animQ = new THREE.Quaternion();
 const _lookQ = new THREE.Quaternion();
 const _m = new THREE.Matrix4();
@@ -188,6 +198,22 @@ function tick() {
   const dt = clock.getDelta();
   mixer?.update(dt);
   applyGaze(); // 必须在 mixer.update 之后，动画每帧会覆写骨骼旋转
+
+  // 唤醒跳跃：抛物线，落地后归零（不干扰 layoutPet 的基准位置）
+  const hopT = (performance.now() - hopStart) / HOP_MS;
+  petAnchor.position.y =
+    petBasePos.y + (hopT >= 0 && hopT < 1 ? 4 * HOP_H * hopT * (1 - hopT) : 0);
+
+  // "我在听"气泡：宠物头顶上方，世界坐标投影到屏幕
+  if (performance.now() < bubbleUntil) {
+    _v3.set(petBasePos.x, petBasePos.y + PET_HEIGHT + 0.15, 0).project(camera);
+    bubble.style.display = "block";
+    bubble.style.left = `${(_v3.x * 0.5 + 0.5) * innerWidth}px`;
+    bubble.style.top = `${(-_v3.y * 0.5 + 0.5) * innerHeight}px`;
+  } else {
+    bubble.style.display = "none";
+  }
+
   renderer.render(scene, camera);
 
   frames++;

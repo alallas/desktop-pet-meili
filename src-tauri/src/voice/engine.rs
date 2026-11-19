@@ -116,8 +116,8 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         vad: &mut vad,
         asr: &asr,
         thinker: thinker.as_mut(),
-        tts: tts.as_mut(),
-        player: player.as_mut(),
+        tts: &mut tts,
+        player: &mut player,
     };
     consume(bus, &mut parts, rx);
     Ok(())
@@ -202,26 +202,26 @@ enum State {
     Speaking,
 }
 
-/// 引擎常驻线程的可变组件集合（consume 参数打包，避免长参数列表）
+/// 引擎常驻线程的可变组件集合（consume 参数打包，避免长参数列表）。
+/// tts/player 以 Option 所有权传入：输出设备可能在使用中恢复（耳机插拔），
+/// player 缺失时 speak 前 lazy 重建（见 consume 内注释）。
 struct EngineParts<'a> {
     spotter: &'a mut KeywordSpotter,
     vad: &'a mut Vad,
     asr: &'a Recognizer,
     thinker: Option<&'a mut crate::llm::Thinker>,
-    tts: Option<&'a mut super::tts::TtsSidecar>,
-    player: Option<&'a mut super::player::Player>,
+    tts: &'a mut Option<super::tts::TtsSidecar>,
+    player: &'a mut Option<super::player::Player>,
 }
 
 /// 引擎常驻线程：状态机分发 0.1s 块——IDLE/SPEAKING 喂 KWS，LISTENING 喂 VAD。
 fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
-    let EngineParts {
-        spotter,
-        vad,
-        asr,
-        thinker,
-        tts,
-        player,
-    } = parts;
+    let spotter = &mut *parts.spotter;
+    let vad = &mut *parts.vad;
+    let asr = parts.asr;
+    let thinker = &mut parts.thinker;
+    let tts = &mut *parts.tts;
+    let player = &mut *parts.player;
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
     // VAD 侧对齐缓冲：0.1s 块（1600）非 512 倍数，攒到 4×512 再喂
     let mut vad_buf: Vec<f32> = Vec::new();
@@ -244,7 +244,7 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                             last_wake = Instant::now();
                             // 打断（barge-in）：播放中命中唤醒词 → 停播并通知前端收嘴
                             if matches!(state, State::Speaking) {
-                                if let Some(p) = player.as_deref_mut() {
+                                if let Some(p) = player.as_mut() {
                                     p.stop();
                                 }
                                 publish_speak_ended(&bus, true);
@@ -269,7 +269,7 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                     }
                     // 播完检测：输出回调把"队列播空"翻成 !is_playing，这里接成事件
                     if matches!(state, State::Speaking) {
-                        let finished = match player.as_deref_mut() {
+                        let finished = match player.as_mut() {
                             Some(p) => !p.is_playing(),
                             None => true,
                         };
@@ -330,8 +330,20 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                         // TTS 出声（M1-3.5b）：合成+播放成功进 SPEAKING；失败降级静默回 IDLE
                         state = match pending_speak {
                             Some(text) => {
-                                match speak_reply(tts.as_deref_mut(), player.as_deref_mut(), &text)
-                                {
+                                // 输出设备可能在使用中恢复（耳机插拔/音频栈自愈）：
+                                // player 缺失时 speak 前 lazy 重建一次，不用重启应用
+                                if player.is_none() {
+                                    match super::player::Player::new() {
+                                        Ok(p) => {
+                                            tracing::info!("tts player: late bind ok");
+                                            *player = Some(p);
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            "tts player: late bind failed, silent reply: {e:#}"
+                                        ),
+                                    }
+                                }
+                                match speak_reply(tts.as_mut(), player.as_mut(), &text) {
                                     Ok(()) => State::Speaking,
                                     Err(e) => {
                                         tracing::error!("tts speak failed, silent reply: {e:#}");

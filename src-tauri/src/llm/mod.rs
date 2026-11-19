@@ -37,8 +37,23 @@ pub struct Thinker {
 impl Thinker {
     /// 启动本地 Qwen3-4B sidecar 并构造思考器。失败返回 Err（调用方降级）。
     pub fn start() -> Result<Self, String> {
+        let sidecar = Sidecar::spawn()?;
+        // 预热（待办 #23-a）：sidecar /health 就绪 ≠ 推理就绪，首请求有 ~11.5s 冷启动
+        // （待办 #23 实机数据）。启动时同步发一条小请求把冷启动摊进应用加载期。
+        let t0 = std::time::Instant::now();
+        let warmup =
+            Self::chat_static(&serde_json::json!([{"role": "user", "content": "在吗"}]), 8);
+        tracing::info!(
+            "llm sidecar: warmup {} in {:?}",
+            if warmup.is_ok() {
+                "ok"
+            } else {
+                "failed (不阻塞，首次对话会慢)"
+            },
+            t0.elapsed()
+        );
         Ok(Self {
-            _sidecar: Sidecar::spawn()?,
+            _sidecar: sidecar,
             history: VecDeque::new(),
         })
     }
@@ -73,9 +88,14 @@ impl Thinker {
 
     /// OpenAI 兼容 /v1/chat/completions（llama-server）
     fn chat(&self, messages: &serde_json::Value) -> Result<String, String> {
+        Self::chat_static(messages, MAX_TOKENS)
+    }
+
+    /// 无实例依赖的纯请求封装（预热也可复用）
+    fn chat_static(messages: &serde_json::Value, max_tokens: u32) -> Result<String, String> {
         let body = serde_json::json!({
             "messages": messages,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": max_tokens,
             "temperature": 0.7,
             // Qwen3 关思考模式，抢首 token（M0 验证配置，勿动）
             "chat_template_kwargs": {"enable_thinking": false},

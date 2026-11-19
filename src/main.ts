@@ -29,9 +29,10 @@ key.position.set(2, 4, 3);
 scene.add(key);
 
 // ---------- 模型 / 动画状态机 ----------
-// M0 测试模型：RobotExpressive（three.js 示例，MIT 授权，占位用，正式形象为 3D 水獭 meili）
-type AnimName = "Idle" | "Walking" | "Dance" | "Wave";
-const STATE_KEYS: Record<string, AnimName> = { "1": "Idle", "2": "Walking", "3": "Dance", "4": "Wave" };
+// M1 测试模型：Soldier（three.js 示例，Mixamo 授权，占位用，正式形象为 3D 水獭 meili）。
+// 换它的原因：RobotExpressive 的 Idle 自带头部摇摆，掩盖倾听反馈动作（2026-11-19 用户要求）。
+type AnimName = "Idle" | "Walk" | "Run" | "TPose";
+const STATE_KEYS: Record<string, AnimName> = { "1": "Idle", "2": "Walk", "3": "Run", "4": "TPose" };
 
 let mixer: THREE.AnimationMixer | null = null;
 const actions = new Map<AnimName, THREE.AnimationAction>();
@@ -57,7 +58,7 @@ function layoutPet() {
 }
 const petBasePos = new THREE.Vector3();
 
-new GLTFLoader().load("/models/RobotExpressive.glb", (gltf) => {
+new GLTFLoader().load("/models/Soldier.glb", (gltf) => {
   const model = gltf.scene;
 
   // 自动适配：统一缩放到 PET_HEIGHT、脚底贴锚点底、水平居中
@@ -74,14 +75,14 @@ new GLTFLoader().load("/models/RobotExpressive.glb", (gltf) => {
   mixer = new THREE.AnimationMixer(model);
   for (const clip of gltf.animations) {
     const name = clip.name as AnimName;
-    if (["Idle", "Walking", "Dance", "Wave"].includes(name)) {
+    if (["Idle", "Walk", "Run", "TPose"].includes(name)) {
       actions.set(name, mixer.clipAction(clip));
     }
   }
   actions.get("Idle")?.play();
 
   model.traverse((o) => {
-    if (!headBone && o instanceof THREE.Bone && o.name === "Head") headBone = o;
+    if (!headBone && o instanceof THREE.Bone && o.name === "mixamorig:Head") headBone = o;
   });
 
   renderer.setAnimationLoop(tick);

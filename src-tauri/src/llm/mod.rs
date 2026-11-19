@@ -9,6 +9,7 @@
 pub mod sidecar;
 
 use std::collections::VecDeque;
+use std::io::BufRead;
 
 use sidecar::Sidecar;
 
@@ -58,10 +59,27 @@ impl Thinker {
         })
     }
 
-    /// 一轮对话：transcript → 美丽口吻回复。阻塞 ~2–5s（M0 实测 2.4–4.4s）。
-    pub fn think(&mut self, transcript: &str) -> Result<String, String> {
+    /// 一轮对话（流式，待办 #23-b）：transcript → 美丽口吻回复。
+    /// LLM stream=true 边生成边按句回调 on_sentence——引擎据此逐句合成入队，
+    /// 首音从"整句生成完"（10–17s）压到"第一句出来+合成"（~4–8s）。
+    /// 句切分责任在本层（已定案）：TTS sidecar 保持"一句一合成"的傻接口。
+    pub fn think_streaming(
+        &mut self,
+        transcript: &str,
+        mut on_sentence: impl FnMut(&str),
+    ) -> Result<String, String> {
         let messages = Self::assemble_messages(&self.history, transcript);
-        let reply = self.chat(&messages)?;
+        let mut splitter = SentenceSplitter::new();
+        let mut reply = String::new();
+        self.chat_stream(&messages, |delta| {
+            reply.push_str(delta);
+            for sentence in splitter.push(delta) {
+                on_sentence(&sentence);
+            }
+        })?;
+        if let Some(tail) = splitter.flush() {
+            on_sentence(&tail);
+        }
         // 短期记忆：入队并截断
         self.history
             .push_back((transcript.to_string(), reply.clone()));
@@ -86,9 +104,50 @@ impl Thinker {
         serde_json::Value::Array(messages)
     }
 
-    /// OpenAI 兼容 /v1/chat/completions（llama-server）
-    fn chat(&self, messages: &serde_json::Value) -> Result<String, String> {
-        Self::chat_static(messages, MAX_TOKENS)
+    /// 流式版：SSE 逐块回调 delta 文本，块聚成完整回复返回。
+    /// 超时放宽到 75s：3 tok/s × 90 tokens 的慢机上限场景（M0 非流式 45s 的余量版）。
+    fn chat_stream(
+        &self,
+        messages: &serde_json::Value,
+        mut on_delta: impl FnMut(&str),
+    ) -> Result<(), String> {
+        let body = serde_json::json!({
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0.7,
+            // Qwen3 关思考模式，抢首 token（M0 验证配置，勿动）
+            "chat_template_kwargs": {"enable_thinking": false},
+            "stream": true,
+        });
+        let resp = ureq::post(&format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            sidecar::PORT
+        ))
+        .timeout(std::time::Duration::from_secs(75))
+        .set("Content-Type", "application/json")
+        .send_json(&body)
+        .map_err(|e| format!("chat 流式请求失败: {e}"))?;
+        // SSE：每行 "data: {json}"，结束行 "data: [DONE]"
+        let reader = std::io::BufReader::new(resp.into_reader());
+        for line in reader.lines() {
+            let line = line.map_err(|e| format!("读 SSE 流失败: {e}"))?;
+            let line = line.trim();
+            let Some(payload) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.trim();
+            if payload == "[DONE]" {
+                break;
+            }
+            let json: serde_json::Value =
+                serde_json::from_str(payload).map_err(|e| format!("SSE 块解析失败: {e}"))?;
+            if let Some(delta) = json["choices"][0]["delta"]["content"].as_str() {
+                if !delta.is_empty() {
+                    on_delta(delta);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 无实例依赖的纯请求封装（预热也可复用）
@@ -118,6 +177,54 @@ impl Thinker {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .ok_or_else(|| "chat 响应缺少 choices[0].message.content".to_string())
+    }
+}
+
+/// 句切分器（流式管线的语言逻辑层）：push 增量文本，凑齐一句（含句尾标点）
+/// 就吐出；flush 把无标点收尾的尾巴整段吐出。只按句末标点切——逗号不切，
+/// 否则口语回复会被剁得太碎，TTS 每句气口太短。
+struct SentenceSplitter {
+    buf: String,
+}
+
+impl SentenceSplitter {
+    /// 句末标点（中文全角 + 英文半角 + 换行）
+    const DELIMS: &'static [char] = &['。', '！', '？', '；', '!', '?', ';', '\n'];
+
+    fn new() -> Self {
+        Self { buf: String::new() }
+    }
+
+    /// 喂增量文本，返回本轮凑齐的完整句子（可能多条，也可能空）
+    fn push(&mut self, delta: &str) -> Vec<String> {
+        self.buf.push_str(delta);
+        let mut out = Vec::new();
+        // char_indices：delim 是多字节字符，得按字符边界切（find 返回的起始
+        // 字节会把标点拦腰截断）
+        while let Some((byte_idx, ch)) = self
+            .buf
+            .char_indices()
+            .find(|(_, c)| Self::DELIMS.contains(c))
+        {
+            let cut_end = byte_idx + ch.len_utf8();
+            let cut = self.buf[..cut_end].trim().to_string();
+            self.buf.drain(..cut_end);
+            if !cut.is_empty() {
+                out.push(cut);
+            }
+        }
+        out
+    }
+
+    /// 流结束：剩余尾巴整段返回（无标点收尾的常见场景）
+    fn flush(&mut self) -> Option<String> {
+        let tail = self.buf.trim().to_string();
+        self.buf.clear();
+        if tail.is_empty() {
+            None
+        } else {
+            Some(tail)
+        }
     }
 }
 
@@ -155,5 +262,24 @@ mod tests {
         let arr = msgs.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[1]["role"], "user");
+    }
+
+    /// 句切分：跨块拼句、多条同批、逗号不切、flush 收尾
+    #[test]
+    fn splitter_waits_for_delimiter() {
+        let mut s = SentenceSplitter::new();
+        assert!(s.push("你好呀，").is_empty(), "逗号不切句");
+        let out = s.push("今天天气不错。我在捡石头！你呢");
+        assert_eq!(out, vec!["你好呀，今天天气不错。", "我在捡石头！"]);
+        assert_eq!(s.flush().as_deref(), Some("你呢"), "尾巴无标点 flush 出");
+    }
+
+    /// 句切分：半角标点与换行也算句末；纯标点残渣不吐
+    #[test]
+    fn splitter_ascii_and_noise() {
+        let mut s = SentenceSplitter::new();
+        let out = s.push("Really? Sure!\n\n");
+        assert_eq!(out, vec!["Really?", "Sure!"]);
+        assert!(s.flush().is_none(), "只剩空白不吐尾巴");
     }
 }

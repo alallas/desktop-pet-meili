@@ -332,7 +332,6 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                         publish_utterance(&bus, duration_ms);
                         // 本地转写（阻塞 ~0.5s；期间采集通道缓冲，唤醒容忍漏听，见 mod.rs）
                         let t0 = Instant::now();
-                        let mut pending_speak: Option<String> = None;
                         match asr.transcribe(&seg.samples) {
                             Ok(text) => {
                                 tracing::info!(
@@ -345,62 +344,106 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                                 // 思考与出声——否则静音环境下桌宠会"自言自语"（2026-11-19 用户投诉）
                                 let meaningful =
                                     text.chars().filter(|c| c.is_alphanumeric()).count() >= 2;
-                                // 思考层（阻塞 ~2–5s）：无 key 的本地路径，人设见 llm/mod.rs
                                 if !meaningful {
                                     tracing::info!(
                                         text = %text,
                                         "transcript too short, skip thinking"
                                     );
                                 }
+                                // 流式出声（#23-b）：LLM 边生成边按句合成入队，
+                                // 首音 ≈ 第一句生成+合成（~4–8s）而非整句完（10–17s）。
+                                // 期间引擎线程在流内，KWS 暂停——打断窗口只有 SPEAKING 态
+                                // （同非流式的思考阻塞期，barge-in 语义不回归）。
+                                // 输出设备可能在使用中恢复（耳机插拔/音频栈自愈）：
+                                // player 缺失时先 lazy 重建一次，不用重启应用
+                                if meaningful {
+                                    if player.is_none() {
+                                        match super::player::Player::new() {
+                                            Ok(p) => {
+                                                tracing::info!("tts player: late bind ok");
+                                                *player = Some(p);
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                "tts player: late bind failed, silent reply: {e:#}"
+                                            ),
+                                        }
+                                    }
+                                }
+                                let mut audio_enqueued = false;
+                                let mut first_audio_ms: Option<u128> = None;
                                 if meaningful {
                                     if let Some(thinker) = thinker.as_deref_mut() {
                                         let t1 = Instant::now();
-                                        let (reply, fallback) = match thinker.think(&text) {
-                                            Ok(r) => (r, false),
-                                            Err(e) => {
-                                                tracing::error!("think failed: {e:#}");
-                                                (crate::llm::FALLBACK_REPLY.to_string(), true)
+                                        let think_result =
+                                            thinker.think_streaming(&text, |sentence| {
+                                                match speak_reply(
+                                                    tts.as_mut(),
+                                                    player.as_mut(),
+                                                    sentence,
+                                                ) {
+                                                    Ok(()) => {
+                                                        if first_audio_ms.is_none() {
+                                                            first_audio_ms =
+                                                                Some(t1.elapsed().as_millis());
+                                                            tracing::info!(
+                                                                elapsed_ms =
+                                                                    t1.elapsed().as_millis(),
+                                                                "tts first audio enqueued"
+                                                            );
+                                                        }
+                                                        audio_enqueued = true;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!(
+                                                        "tts speak failed, skip sentence: {e:#}"
+                                                    )
+                                                    }
+                                                }
+                                            });
+                                        match think_result {
+                                            Ok(reply) => {
+                                                tracing::info!(
+                                                    latency_ms = t1.elapsed().as_millis(),
+                                                    text = %reply,
+                                                    "llm reply (streamed)"
+                                                );
+                                                publish_reply(
+                                                    &bus,
+                                                    &reply,
+                                                    t1.elapsed().as_millis(),
+                                                );
                                             }
-                                        };
-                                        tracing::info!(
-                                            latency_ms = t1.elapsed().as_millis(),
-                                            fallback = fallback,
-                                            text = %reply,
-                                            "llm reply"
-                                        );
-                                        publish_reply(&bus, &reply, t1.elapsed().as_millis());
-                                        pending_speak = Some(reply);
+                                            Err(e) => {
+                                                // 流式失败兜底：整句兜底话术走一次性合成
+                                                tracing::error!("think failed: {e:#}");
+                                                let fallback =
+                                                    crate::llm::FALLBACK_REPLY.to_string();
+                                                if speak_reply(
+                                                    tts.as_mut(),
+                                                    player.as_mut(),
+                                                    &fallback,
+                                                )
+                                                .is_ok()
+                                                {
+                                                    audio_enqueued = true;
+                                                }
+                                                publish_reply(
+                                                    &bus,
+                                                    &fallback,
+                                                    t1.elapsed().as_millis(),
+                                                );
+                                            }
+                                        }
                                     }
                                 }
+                                state = if audio_enqueued {
+                                    State::Speaking
+                                } else {
+                                    State::Idle
+                                };
                             }
                             Err(e) => tracing::error!("asr failed: {e:#}"),
                         }
-                        // TTS 出声（M1-3.5b）：合成+播放成功进 SPEAKING；失败降级静默回 IDLE
-                        state = match pending_speak {
-                            Some(text) => {
-                                // 输出设备可能在使用中恢复（耳机插拔/音频栈自愈）：
-                                // player 缺失时 speak 前 lazy 重建一次，不用重启应用
-                                if player.is_none() {
-                                    match super::player::Player::new() {
-                                        Ok(p) => {
-                                            tracing::info!("tts player: late bind ok");
-                                            *player = Some(p);
-                                        }
-                                        Err(e) => tracing::warn!(
-                                            "tts player: late bind failed, silent reply: {e:#}"
-                                        ),
-                                    }
-                                }
-                                match speak_reply(tts.as_mut(), player.as_mut(), &text) {
-                                    Ok(()) => State::Speaking,
-                                    Err(e) => {
-                                        tracing::error!("tts speak failed, silent reply: {e:#}");
-                                        State::Idle
-                                    }
-                                }
-                            }
-                            None => State::Idle,
-                        };
                     } else if since.elapsed() >= MAX_LISTENING {
                         // 兜底：唤醒后 12s 无转写 = 大概率误唤醒 → 回 IDLE 并静默 30s，
                         // 压住环境噪声造成的连续自触发（真实用户喊完不说话的代价：

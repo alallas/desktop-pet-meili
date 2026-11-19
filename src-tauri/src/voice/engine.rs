@@ -33,6 +33,19 @@ const WAKE_COOLDOWN: Duration = Duration::from_millis(1500);
 const CHANNEL_BLOCKS: usize = 20;
 /// LISTENING 态超时：唤醒后一直不说话/VAD 漏检，超时回 IDLE 重新常听
 const MAX_LISTENING: Duration = Duration::from_secs(12);
+/// 唤醒命中块的 RMS 下限：房间环境声（键盘/视频/空调）实测 0.007–0.013，
+/// 真人对着麦克风喊"美丽" ≥0.02。低于此值的命中视为噪声误唤醒（2026-11-19
+/// 用户静音状态下 9 次误触发/4min 的缓解措施，最终仍归 #6 定制 KWS）。
+const WAKE_MIN_RMS: f32 = 0.012;
+/// 空唤醒抑制：唤醒后 12s 内没有任何转写（纯误唤醒）→ 30s 不再响应唤醒，
+/// 压住环境噪声造成的连续自触发风暴
+const EMPTY_WAKE_SUPPRESS: Duration = Duration::from_secs(30);
+
+/// 块 RMS（16k 单声道 f32）
+fn chunk_rms(chunk: &[f32]) -> f32 {
+    let sq: f64 = chunk.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+    (sq / chunk.len().max(1) as f64).sqrt() as f32
+}
 
 /// 启动语音引擎（装配层唯一入口，进程常驻）。失败只记日志不 panic——
 /// 无麦克风的环境桌宠其余功能不受影响（装配层不重试）。
@@ -227,6 +240,8 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
     let mut vad_buf: Vec<f32> = Vec::new();
     // 初始即允许首次命中（now() - cooldown）
     let mut last_wake = Instant::now() - WAKE_COOLDOWN;
+    // 空唤醒抑制截止戳：None = 未抑制（初始不抑制，避免启动后 30s 不应期）
+    let mut suppress_until: Option<Instant> = None;
     let mut state = State::Idle;
     let mut meter = LevelMeter::new();
     loop {
@@ -239,8 +254,23 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
             let chunk: Vec<f32> = buf.drain(..CHUNK_SAMPLES).collect();
             match state {
                 State::Idle | State::Speaking => {
+                    let suppressed = suppress_until.is_some_and(|t| Instant::now() < t);
                     if let Some(hit) = spotter.accept_waveform(&chunk) {
-                        if last_wake.elapsed() >= WAKE_COOLDOWN {
+                        let rms = chunk_rms(&chunk);
+                        if rms < WAKE_MIN_RMS {
+                            // 噪声误唤醒：RMS 低于真人喊话下限，吃掉命中并安静 1.5s
+                            tracing::info!(
+                                rms = format_args!("{:.5}", rms),
+                                "wake hit rejected: below rms floor"
+                            );
+                            last_wake = Instant::now();
+                        } else if suppressed {
+                            tracing::info!(
+                                rms = format_args!("{:.5}", rms),
+                                "wake hit suppressed: empty-wake quiet period"
+                            );
+                            last_wake = Instant::now();
+                        } else if last_wake.elapsed() >= WAKE_COOLDOWN {
                             last_wake = Instant::now();
                             // 打断（barge-in）：播放中命中唤醒词 → 停播并通知前端收嘴
                             if matches!(state, State::Speaking) {
@@ -308,24 +338,36 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                                     "asr transcript"
                                 );
                                 publish_transcript(&bus, &text, duration_ms);
+                                // 碎语门：环境噪声凑出的单音节转写（"I."/"。"等）不触发
+                                // 思考与出声——否则静音环境下桌宠会"自言自语"（2026-11-19 用户投诉）
+                                let meaningful =
+                                    text.chars().filter(|c| c.is_alphanumeric()).count() >= 2;
                                 // 思考层（阻塞 ~2–5s）：无 key 的本地路径，人设见 llm/mod.rs
-                                if let Some(thinker) = thinker.as_deref_mut() {
-                                    let t1 = Instant::now();
-                                    let (reply, fallback) = match thinker.think(&text) {
-                                        Ok(r) => (r, false),
-                                        Err(e) => {
-                                            tracing::error!("think failed: {e:#}");
-                                            (crate::llm::FALLBACK_REPLY.to_string(), true)
-                                        }
-                                    };
+                                if !meaningful {
                                     tracing::info!(
-                                        latency_ms = t1.elapsed().as_millis(),
-                                        fallback = fallback,
-                                        text = %reply,
-                                        "llm reply"
+                                        text = %text,
+                                        "transcript too short, skip thinking"
                                     );
-                                    publish_reply(&bus, &reply, t1.elapsed().as_millis());
-                                    pending_speak = Some(reply);
+                                }
+                                if meaningful {
+                                    if let Some(thinker) = thinker.as_deref_mut() {
+                                        let t1 = Instant::now();
+                                        let (reply, fallback) = match thinker.think(&text) {
+                                            Ok(r) => (r, false),
+                                            Err(e) => {
+                                                tracing::error!("think failed: {e:#}");
+                                                (crate::llm::FALLBACK_REPLY.to_string(), true)
+                                            }
+                                        };
+                                        tracing::info!(
+                                            latency_ms = t1.elapsed().as_millis(),
+                                            fallback = fallback,
+                                            text = %reply,
+                                            "llm reply"
+                                        );
+                                        publish_reply(&bus, &reply, t1.elapsed().as_millis());
+                                        pending_speak = Some(reply);
+                                    }
                                 }
                             }
                             Err(e) => tracing::error!("asr failed: {e:#}"),
@@ -357,8 +399,14 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                             None => State::Idle,
                         };
                     } else if since.elapsed() >= MAX_LISTENING {
-                        // 兜底：说了唤醒词但一直没说话（或 VAD 漏检），别永远占着 LISTENING
-                        tracing::info!("listening timeout, back to idle");
+                        // 兜底：唤醒后 12s 无转写 = 大概率误唤醒 → 回 IDLE 并静默 30s，
+                        // 压住环境噪声造成的连续自触发（真实用户喊完不说话的代价：
+                        // 30s 内重喊无反应，可接受——真人多半会接着说指令）
+                        tracing::info!(
+                            "listening timeout, back to idle (empty wake, suppress {:?})",
+                            EMPTY_WAKE_SUPPRESS
+                        );
+                        suppress_until = Some(Instant::now() + EMPTY_WAKE_SUPPRESS);
                         state = State::Idle;
                     }
                 }

@@ -354,23 +354,21 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                                 // 首音 ≈ 第一句生成+合成（~4–8s）而非整句完（10–17s）。
                                 // 期间引擎线程在流内，KWS 暂停——打断窗口只有 SPEAKING 态
                                 // （同非流式的思考阻塞期，barge-in 语义不回归）。
-                                // 输出设备可能在使用中恢复（耳机插拔/音频栈自愈）：
-                                // player 缺失时先 lazy 重建一次，不用重启应用
-                                if meaningful {
-                                    if player.is_none() {
-                                        match super::player::Player::new() {
-                                            Ok(p) => {
-                                                tracing::info!("tts player: late bind ok");
-                                                *player = Some(p);
-                                            }
-                                            Err(e) => tracing::warn!(
-                                                "tts player: late bind failed, silent reply: {e:#}"
-                                            ),
-                                        }
-                                    }
-                                }
                                 let mut audio_enqueued = false;
                                 let mut first_audio_ms: Option<u128> = None;
+                                if meaningful && player.is_none() {
+                                    // 输出设备可能在使用中恢复（耳机插拔/音频栈自愈）：
+                                    // player 缺失时先 lazy 重建一次，不用重启应用
+                                    match super::player::Player::new() {
+                                        Ok(p) => {
+                                            tracing::info!("tts player: late bind ok");
+                                            *player = Some(p);
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            "tts player: late bind failed, silent reply: {e:#}"
+                                        ),
+                                    }
+                                }
                                 if meaningful {
                                     if let Some(thinker) = thinker.as_deref_mut() {
                                         let t1 = Instant::now();

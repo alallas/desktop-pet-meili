@@ -51,7 +51,10 @@ static SESSION: Mutex<Option<GlobalSystemMediaTransportControlsSession>> = Mutex
 /// 不走事件总线是因为引擎常驻线程轮询比挂监听器简单，且允许引擎"查询式"降级
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
-/// 供语音引擎等模块查询：系统当前是否有媒体在播放
+/// 供语音引擎等模块查询：系统当前是否有媒体在播放。
+/// 当前无消费者：SMTC 唤醒抑制方案被用户否决（2026-11-19），保留给
+/// M2 行为引擎"听歌跳舞"（待办 #29）使用
+#[allow(dead_code)]
 pub fn is_media_playing() -> bool {
     PLAYING.load(Ordering::Relaxed)
 }

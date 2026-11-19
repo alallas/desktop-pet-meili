@@ -34,12 +34,17 @@ const CHANNEL_BLOCKS: usize = 20;
 /// LISTENING 态超时：唤醒后一直不说话/VAD 漏检，超时回 IDLE 重新常听
 const MAX_LISTENING: Duration = Duration::from_secs(12);
 /// 唤醒命中块的 RMS 下限：房间环境声（键盘/视频/空调）实测 0.007–0.013，
-/// 真人对着麦克风喊"美丽" ≥0.02。低于此值的命中视为噪声误唤醒（2026-11-19
-/// 用户静音状态下 9 次误触发/4min 的缓解措施，最终仍归 #6 定制 KWS）。
-const WAKE_MIN_RMS: f32 = 0.012;
-/// 空唤醒抑制：唤醒后 12s 内没有任何转写（纯误唤醒）→ 30s 不再响应唤醒，
-/// 压住环境噪声造成的连续自触发风暴
-const EMPTY_WAKE_SUPPRESS: Duration = Duration::from_secs(30);
+/// 真人对着麦克风喊"美丽" ≥0.02——但实测真人喊声落块可能低到 0.010（多音节
+/// 之间的安静缝隙恰好是关键词尾块）。0.010 是噪声门与灵敏度目前的折中，
+/// 最终仍归 #6 定制 KWS。
+const WAKE_MIN_RMS: f32 = 0.010;
+/// 空唤醒抑制：唤醒后 12s 内没有任何转写 → 10s 不再响应唤醒，压住连续自触发
+/// 风暴。曾设 30s，实测把真人的连续呼喊整段吞掉（2026-11-19 用户投诉灵敏度）。
+/// 空唤醒现在会出声回应（WAKE_NUDGE），用户能感知"她在"，10s 不应期可接受。
+const EMPTY_WAKE_SUPPRESS: Duration = Duration::from_secs(10);
+/// 空唤醒回应话术：喊了名字没接话时的短应答（不走 LLM，零延迟）。产品语义：
+/// 喊名字必须有回应，否则用户以为没听到（多次"喊了没反应"投诉的根因）
+const WAKE_NUDGE: &str = "嗯？怎么啦？";
 
 /// 块 RMS（16k 单声道 f32）
 fn chunk_rms(chunk: &[f32]) -> f32 {
@@ -443,15 +448,19 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                             Err(e) => tracing::error!("asr failed: {e:#}"),
                         }
                     } else if since.elapsed() >= MAX_LISTENING {
-                        // 兜底：唤醒后 12s 无转写 = 大概率误唤醒 → 回 IDLE 并静默 30s，
-                        // 压住环境噪声造成的连续自触发（真实用户喊完不说话的代价：
-                        // 30s 内重喊无反应，可接受——真人多半会接着说指令）
+                        // 唤醒后 12s 无转写：大概率是"只喊了名字没接话"（真实用法，
+                        // 用户想确认她听到了）——出声短应答 + 10s 抑制压住噪声风暴。
+                        // 播放器不可用时静默回 IDLE（老行为）。
                         tracing::info!(
-                            "listening timeout, back to idle (empty wake, suppress {:?})",
+                            "listening timeout, nudge (empty wake, suppress {:?})",
                             EMPTY_WAKE_SUPPRESS
                         );
                         suppress_until = Some(Instant::now() + EMPTY_WAKE_SUPPRESS);
-                        state = State::Idle;
+                        state = if speak_reply(tts.as_mut(), player.as_mut(), WAKE_NUDGE).is_ok() {
+                            State::Speaking
+                        } else {
+                            State::Idle
+                        };
                     }
                 }
             }

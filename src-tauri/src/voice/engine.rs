@@ -91,18 +91,8 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let (tx, rx) = sync_channel::<Vec<f32>>(CHANNEL_BLOCKS);
-    let in_rate = config.sample_rate().0 as f64;
-    let channels = config.channels() as usize;
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => {
-            build_stream::<f32>(&device, &config.config(), channels, tx, in_rate)?
-        }
-        cpal::SampleFormat::I16 => {
-            build_stream::<i16>(&device, &config.config(), channels, tx, in_rate)?
-        }
-        other => return Err(format!("不支持的采样格式 {other:?}").into()),
-    };
-    stream.play()?;
+    let mut capture = CaptureHandle::new(device, config, tx)?;
+    capture.rebuild()?;
     tracing::info!("voice engine: listening for wake word");
 
     // 思考层（本地 Qwen3-4B sidecar）：启动失败不致命——语音链路照常，只是没回复
@@ -137,11 +127,68 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tts: &mut tts,
         player: &mut player,
     };
-    consume(bus, &mut parts, rx);
+    consume(bus, &mut parts, rx, &mut capture);
     Ok(())
 }
 
-/// cpal 回调与引擎线程的分界线：回调里只做 单声道化 + 线性重采样 + try_send。
+/// 采集流句柄（待办 #27 看门狗）：持有重建所需的一切参数，断流时引擎线程
+/// 可自行重建（无需重启应用）。Windows 会在设备重平衡时静默暂停采集流
+/// （12:08 实机：唤醒后 1.3s 断流 ~10s，无错误回调）。
+struct CaptureHandle {
+    device: cpal::Device,
+    config: cpal::StreamConfig,
+    format: cpal::SampleFormat,
+    channels: usize,
+    in_rate: f64,
+    tx: SyncSender<Vec<f32>>,
+    /// None = 已停止/重建中；drop Stream 即停采集（cpal 保活语义）
+    stream: Option<cpal::Stream>,
+}
+
+impl CaptureHandle {
+    fn new(
+        device: cpal::Device,
+        config: cpal::SupportedStreamConfig,
+        tx: SyncSender<Vec<f32>>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let handle = Self {
+            channels: config.channels() as usize,
+            in_rate: config.sample_rate().0 as f64,
+            format: config.sample_format(),
+            config: config.config(),
+            device,
+            tx,
+            stream: None,
+        };
+        Ok(handle)
+    }
+
+    /// 停旧流建新流。失败保留旧流（若还在）或返回 Err（调用方记日志，下轮重试）
+    fn rebuild(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.stream = None; // 先停：同一个设备上重复建流可能冲突
+        let stream = match self.format {
+            cpal::SampleFormat::F32 => build_stream::<f32>(
+                &self.device,
+                &self.config,
+                self.channels,
+                self.tx.clone(),
+                self.in_rate,
+            )?,
+            cpal::SampleFormat::I16 => build_stream::<i16>(
+                &self.device,
+                &self.config,
+                self.channels,
+                self.tx.clone(),
+                self.in_rate,
+            )?,
+            other => return Err(format!("不支持的采样格式 {other:?}").into()),
+        };
+        stream.play()?;
+        self.stream = Some(stream);
+        tracing::info!("voice capture: stream rebuilt");
+        Ok(())
+    }
+}
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -232,8 +279,24 @@ struct EngineParts<'a> {
     player: &'a mut Option<super::player::Player>,
 }
 
+/// 看门狗阈值：超过此时长没收到任何采集块 = 断流（正常节奏是 0.1s 一块，
+/// recv 超时仅 200ms）。引擎阻塞期（ASR/LLM 思考最长 ~30s）不算断流，
+/// 由 in_blocking 豁免——否则思考中会被误报重建。
+const CAPTURE_STALL: Duration = Duration::from_secs(5);
+/// 唤醒回填环容量（8 × 0.1s = 0.8s）：待办 #12，KWS 命中瞬间 vad.reset()
+/// 会清掉唤醒词起音所在的更早音频，转写首字丢失；环里留最近音频，命中后
+/// 把尾巴回填给 VAD。
+const RING_CAPACITY: usize = 8;
+/// 回填长度：命中块之前 0.4s（唤醒词起音最多落在这么远）
+const REPLAY_CHUNKS: usize = 4;
+
 /// 引擎常驻线程：状态机分发 0.1s 块——IDLE/SPEAKING 喂 KWS，LISTENING 喂 VAD。
-fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
+fn consume(
+    bus: EventBus,
+    parts: &mut EngineParts,
+    rx: Receiver<Vec<f32>>,
+    capture: &mut CaptureHandle,
+) {
     let spotter = &mut *parts.spotter;
     let vad = &mut *parts.vad;
     let asr = parts.asr;
@@ -251,10 +314,35 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
     let mut suppress_until: Option<Instant> = None;
     let mut state = State::Idle;
     let mut meter = LevelMeter::new();
+    // 看门狗状态：上次收到采集块的时间。引擎阻塞期（ASR/LLM 思考）本就不在
+    // recv 上，看门狗无从误报——回到 recv 时会先收到通道里积压的块， Healthy
+    // 流不会触发；真断流则任何时刻回到 recv 都会立刻暴露（stalled 日志=此刻往前
+    // 都没块，含阻塞期，重建无害——流是真死了）
+    let mut last_chunk_at = Instant::now();
+    // #12 唤醒回填环：最近 RING_CAPACITY 个 IDLE/SPEAKING 态的块
+    let mut ring: std::collections::VecDeque<Vec<f32>> = std::collections::VecDeque::new();
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(chunk) => buf.extend_from_slice(&chunk),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Ok(chunk) => {
+                last_chunk_at = Instant::now();
+                buf.extend_from_slice(&chunk);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 看门狗：超过 CAPTURE_STALL 收不到块 = 采集被系统静默暂停
+                // （坑：无错误回调）。单线程模型下引擎阻塞期本就不在 recv 上，
+                // 无需豁免标志；重建流自愈，失败按阈值间隔重试
+                if last_chunk_at.elapsed() >= CAPTURE_STALL {
+                    tracing::error!(
+                        stalled_ms = last_chunk_at.elapsed().as_millis(),
+                        "voice capture stalled, rebuilding stream"
+                    );
+                    if let Err(e) = capture.rebuild() {
+                        tracing::error!("voice capture rebuild failed: {e:#}");
+                    }
+                    last_chunk_at = Instant::now();
+                }
+                continue;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
         while buf.len() >= CHUNK_SAMPLES {
@@ -274,6 +362,13 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                         last_speech = Some(Instant::now());
                     }
                     while vad.pop_segment().is_some() {}
+                    // #12 回填环：只积累 IDLE/SPEAKING 态的块（LISTENING 的音频
+                    // 属已唤醒会话，不该回填进下一轮）。push 在命中判定之前：
+                    // 命中块本身不进环（该轮唤醒里 ring.clear() 会清掉它）。
+                    ring.push_back(chunk.clone());
+                    if ring.len() > RING_CAPACITY {
+                        ring.pop_front();
+                    }
                     let suppressed = suppress_until.is_some_and(|t| Instant::now() < t);
                     if let Some(hit) = spotter.accept_waveform(&chunk) {
                         let rms = chunk_rms(&chunk);
@@ -313,9 +408,17 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                             // 唤醒事件本体不含语音内容且全程本地处理：隐私档 Minimal
                             event.privacy_tier = PrivacyTier::Minimal;
                             bus.publish(event);
-                            // 命中块尾部（唤醒词收音）也进 VAD：min_speech 会滤掉过短残渣
+                            // 命中块尾部（唤醒词收音）也进 VAD：min_speech 会滤掉过短残渣。
+                            // #12 回填：reset 会清掉唤醒词起音所在的更早音频（起音在
+                            // 命中块之前的块里），不回填则转写首字丢失——把环里命中前
+                            // 0.4s 的块重喂给 VAD（这些块 reset 前已喂过，回放无副作用）
                             vad.reset();
                             vad_buf.clear();
+                            let keep = ring.len().saturating_sub(REPLAY_CHUNKS);
+                            for old in ring.iter().skip(keep) {
+                                vad_buf.extend_from_slice(old);
+                            }
+                            ring.clear();
                             tracing::info!(
                                 "wake hit keyword={:?}, entering listening",
                                 hit.keyword
@@ -355,7 +458,8 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                         publish_utterance(&bus, duration_ms);
                         // 本地转写（阻塞 ~0.5s；期间采集通道缓冲，唤醒容忍漏听，见 mod.rs）
                         let t0 = Instant::now();
-                        match asr.transcribe(&seg.samples) {
+                        let transcribe_result = asr.transcribe(&seg.samples);
+                        match transcribe_result {
                             Ok(text) => {
                                 tracing::info!(
                                     elapsed_ms = t0.elapsed().as_millis(),

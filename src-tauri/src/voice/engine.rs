@@ -260,7 +260,10 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                             // 命中块尾部（唤醒词收音）也进 VAD：min_speech 会滤掉过短残渣
                             vad.reset();
                             vad_buf.clear();
-                            tracing::info!("wake hit, entering listening");
+                            tracing::info!(
+                                "wake hit keyword={:?}, entering listening",
+                                hit.keyword
+                            );
                             state = State::Listening {
                                 since: Instant::now(),
                             };

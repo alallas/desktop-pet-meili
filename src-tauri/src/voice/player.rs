@@ -30,72 +30,63 @@ pub struct Player {
 }
 
 impl Player {
-    /// 打开默认输出设备并启动输出流。失败返回 Err（调用方降级：无声音）。
+    /// 打开输出设备并启动输出流。失败返回 Err（调用方降级：无声音）。
     ///
-    /// 候选配置遍历（坑 39）：Senary 扬声器实测 default_output_config 报 F32
-    /// 48kHz，但按它 build 流必失败 0x8889000F（WASAPI 设备期不支持）——故默认
-    /// 配置优先、失败后回退遍历 supported_output_configs 逐一尝试。
+    /// 双重候选遍历（坑 39）：实测 default_output_config 对输出设备会"虚报"
+    /// （按其 build 流必失败 0x8889000F），且默认设备本身可能是失效端点（无线
+    /// 耳机连接后扬声器被禁用）——故外层遍历全部输出设备，内层对每个设备先
+    /// 试默认配置、失败后遍历 supported_output_configs，第一个建流成功者启用。
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("无默认输出设备（扬声器）")?;
         let state = Arc::new(Mutex::new(PlayState {
             queue: VecDeque::new(),
             playing: false,
         }));
 
-        let mut attempts: Vec<(cpal::StreamConfig, cpal::SampleFormat)> = Vec::new();
-        if let Ok(def) = device.default_output_config() {
-            attempts.push((def.config(), def.sample_format()));
-        }
-        if let Ok(ranges) = device.supported_output_configs() {
-            for range in ranges {
-                attempts.push((range.with_max_sample_rate().config(), range.sample_format()));
+        let mut tried = 0usize;
+        for device in host
+            .output_devices()
+            .map_err(|e| format!("枚举输出设备失败: {e}"))?
+        {
+            let dev_name = device.name().unwrap_or_default();
+            // 内层候选：默认配置优先，其后枚举设备支持的全部配置
+            let mut attempts: Vec<(cpal::StreamConfig, cpal::SampleFormat)> = Vec::new();
+            if let Ok(def) = device.default_output_config() {
+                attempts.push((def.config(), def.sample_format()));
             }
-        }
-        if attempts.is_empty() {
-            return Err("扬声器无任何可用输出配置".into());
-        }
-
-        let mut last_err = String::new();
-        let mut built = None;
-        for (cfg, fmt) in &attempts {
-            let res = match fmt {
-                cpal::SampleFormat::F32 => build_output::<f32>(&device, cfg, &state),
-                cpal::SampleFormat::I16 => build_output::<i16>(&device, cfg, &state),
-                other => {
-                    last_err = format!("跳过不支持格式 {other:?}");
-                    continue;
+            if let Ok(ranges) = device.supported_output_configs() {
+                for range in ranges {
+                    attempts.push((range.with_max_sample_rate().config(), range.sample_format()));
                 }
-            };
-            match res {
-                Ok(stream) => {
+            }
+            for (cfg, fmt) in &attempts {
+                let res = match fmt {
+                    cpal::SampleFormat::F32 => build_output::<f32>(&device, cfg, &state),
+                    cpal::SampleFormat::I16 => build_output::<i16>(&device, cfg, &state),
+                    _ => continue,
+                };
+                tried += 1;
+                if let Ok(stream) = res {
                     tracing::info!(
+                        device = %dev_name,
                         rate = cfg.sample_rate.0,
                         channels = cfg.channels,
                         format = ?fmt,
-                        "tts player: output stream up (fallback walk)"
+                        "tts player: output stream up"
                     );
-                    built = Some((stream, cfg.sample_rate.0 as f64, cfg.channels as usize));
-                    break;
+                    stream.play().map_err(|e| format!("播放流启动失败: {e}"))?;
+                    return Ok(Self {
+                        stream,
+                        state,
+                        out_rate: cfg.sample_rate.0 as f64,
+                        channels: cfg.channels as usize,
+                    });
                 }
-                Err(e) => last_err = format!("{fmt:?} @{}ch: {e}", cfg.channels),
             }
         }
-        let (stream, out_rate, channels) = built.ok_or_else(|| {
-            format!(
-                "构建输出流失败（{} 个候选均失败）: {last_err}",
-                attempts.len()
-            )
-        })?;
-        stream.play().map_err(|e| format!("播放流启动失败: {e}"))?;
-        Ok(Self {
-            stream,
-            state,
-            out_rate,
-            channels,
-        })
+        Err(format!(
+            "无任何输出设备可建流（{tried} 个配置尝试均失败）；若刚连接耳机，稍后重试"
+        ))
     }
 
     /// 播放一段 16-bit PCM WAV（Kokoro sidecar 产物，24kHz 单声道）。

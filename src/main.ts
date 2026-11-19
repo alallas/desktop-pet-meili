@@ -69,6 +69,8 @@ new GLTFLoader().load("/models/Soldier.glb", (gltf) => {
   model.scale.setScalar(scale);
   model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
   bboxInfo = `${size.x.toFixed(1)}x${size.y.toFixed(1)}x${size.z.toFixed(1)}`;
+  // Mixamo 模型正面朝 +Z，与 RobotExpressive（-Z）相反，需转 180° 面向用户
+  model.rotation.y = Math.PI;
   petAnchor.add(model);
   layoutPet();
 

@@ -117,21 +117,52 @@ function lookAtUser(ms: number) {
 const bubble = document.createElement("div");
 bubble.textContent = "我在听~";
 bubble.style.cssText =
-  "position:fixed;display:none;padding:6px 12px;background:#fff;color:#333;" +
-  "border-radius:12px;font:14px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.25);" +
+  "position:fixed;display:none;padding:8px 16px;background:#fff;color:#111;" +
+  "border:2px solid #4a9eff;border-radius:14px;font:bold 16px sans-serif;" +
+  "box-shadow:0 3px 12px rgba(0,0,0,.3);" +
   "transform:translate(-50%,-130%);white-space:nowrap;z-index:98;pointer-events:none";
 document.body.appendChild(bubble);
+
+// 唤醒提示音：Web Audio 现场合成双音"叮"（零音频文件零授权问题；
+// 小爱/Siri 都有唤醒确认音，是"她听到了"的不可忽略信号——2026-11-19 用户反馈
+// "喊 10 次都不出来"实为反馈太弱：KWS 10/10 命中但跳一下+小气泡注意不到）
+let audioCtx: AudioContext | null = null;
+function playDing() {
+  try {
+    audioCtx ??= new AudioContext();
+    // 自动播放策略可能挂起：任何一次用户手势后恢复（下次唤醒即可发声）
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    const t0 = audioCtx.currentTime;
+    for (const [freq, delay, dur] of [
+      [880, 0, 0.12],
+      [1318, 0.1, 0.22],
+    ] as const) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t0 + delay);
+      gain.gain.exponentialRampToValueAtTime(0.25, t0 + delay + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + delay + dur);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0 + delay);
+      osc.stop(t0 + delay + dur + 0.05);
+    }
+  } catch {
+    /* 音频不可用不阻塞唤醒反馈 */
+  }
+}
 
 let bubbleUntil = 0; // 气泡显示截止戳（与引擎 MAX_LISTENING 12s 对齐）
 let bubbleShownLogged = false; // 气泡显示日志去抖（transition 才记）
 let hopStart = Number.NEGATIVE_INFINITY; // 跳跃动画起点
-const HOP_MS = 450;
-const HOP_H = 0.22; // 跳跃高度（世界单位）
+const HOP_MS = 500;
+const HOP_H = 0.35; // 跳跃高度（世界单位），从 0.22 加高——跳一下必须看得见
 
 function wakeCue() {
   hopStart = performance.now();
   bubbleUntil = performance.now() + 12000;
   lookAtUser(4000);
+  playDing();
   void commands
     .debugLog(
       `[wakecue] fired bubbleUntil=${bubbleUntil} body=${!!document.body} bubble=${!!bubble}`

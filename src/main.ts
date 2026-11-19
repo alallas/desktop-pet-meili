@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { events } from "./ipc/client";
+import { commands, events } from "./ipc/client";
 
 const debug = document.getElementById("debug")!;
 const win = getCurrentWindow();
@@ -116,6 +116,7 @@ bubble.style.cssText =
 document.body.appendChild(bubble);
 
 let bubbleUntil = 0; // 气泡显示截止戳（与引擎 MAX_LISTENING 12s 对齐）
+let bubbleShownLogged = false; // 气泡显示日志去抖（transition 才记）
 let hopStart = Number.NEGATIVE_INFINITY; // 跳跃动画起点
 const HOP_MS = 450;
 const HOP_H = 0.22; // 跳跃高度（世界单位）
@@ -123,7 +124,12 @@ const HOP_H = 0.22; // 跳跃高度（世界单位）
 function wakeCue() {
   hopStart = performance.now();
   bubbleUntil = performance.now() + 12000;
-  lookAtUser(2500);
+  lookAtUser(4000);
+  void commands
+    .debugLog(
+      `[wakecue] fired bubbleUntil=${bubbleUntil} body=${!!document.body} bubble=${!!bubble}`
+    )
+    .catch(() => {});
 }
 
 void events.eventStream.listen((e) => {
@@ -177,15 +183,20 @@ function applyGaze() {
   // 只追踪正面 150° 锥形范围，身后不扭头
   if (_dir.z < -0.2 * _dir.length()) return;
 
-  // 记录动画姿态，与注视姿态插值混合（避免 IK 生硬）
+  // 记录动画姿态，与注视姿态插值混合（避免 IK 生硬）。
+  // 唤醒/说话覆盖期用全权重——必须明显区别于平时的摇摆跟随
+  const gazeWeight = performance.now() < gazeOverrideUntil ? 1.0 : 0.5;
   _animQ.copy(headBone.quaternion);
-  _m.lookAt(_headPos, target, UP);
+  // 关键：Matrix4.lookAt 是相机约定（+Z 指向 eye），骨骼"脸"是 +Z——
+  // 参数必须是 (target, headPos) 才能让脸朝向目标；写成 (headPos, target)
+  // 会得到"后脑勺对目标"（M0 起光标跟随一直是反的，M1-3.5b 实机才看穿）
+  _m.lookAt(target, _headPos, UP);
   _lookQ.setFromRotationMatrix(_m);
   // lookAt 得到的是世界旋转，需换算到父空间
   const parent = headBone.parent!;
   parent.updateWorldMatrix(true, false);
   _lookQ.premultiply(parent.getWorldQuaternion(new THREE.Quaternion()).invert());
-  headBone.quaternion.copy(_animQ).slerp(_lookQ, 0.5);
+  headBone.quaternion.copy(_animQ).slerp(_lookQ, gazeWeight);
 }
 
 // ---------- 主循环 ----------
@@ -205,13 +216,21 @@ function tick() {
     petBasePos.y + (hopT >= 0 && hopT < 1 ? 4 * HOP_H * hopT * (1 - hopT) : 0);
 
   // "我在听"气泡：宠物头顶上方，世界坐标投影到屏幕
-  if (performance.now() < bubbleUntil) {
+  const bubbleOn = performance.now() < bubbleUntil;
+  if (bubbleOn) {
     _v3.set(petBasePos.x, petBasePos.y + PET_HEIGHT + 0.15, 0).project(camera);
     bubble.style.display = "block";
     bubble.style.left = `${(_v3.x * 0.5 + 0.5) * innerWidth}px`;
     bubble.style.top = `${(-_v3.y * 0.5 + 0.5) * innerHeight}px`;
+    if (!bubbleShownLogged) {
+      bubbleShownLogged = true;
+      void commands
+        .debugLog(`[wakecue] bubble shown at ${bubble.style.left},${bubble.style.top}`)
+        .catch(() => {});
+    }
   } else {
     bubble.style.display = "none";
+    bubbleShownLogged = false;
   }
 
   renderer.render(scene, camera);
@@ -264,7 +283,6 @@ await refresh();
 // ---------- M1-1 IPC ping-pong 样例 ----------
 // Booted 事件（Rust→WebView）+ ping 命令（WebView→Rust）双通道验证。
 // 结果写 %TEMP%\chaojiandai-debug.log；M1-2 事件监视器调试页上线后移除本段。
-import { commands } from "./ipc/client";
 void events.booted.listen((e) => {
   void commands
     .debugLog(

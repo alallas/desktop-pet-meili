@@ -33,11 +33,6 @@ const WAKE_COOLDOWN: Duration = Duration::from_millis(1500);
 const CHANNEL_BLOCKS: usize = 20;
 /// LISTENING 态超时：唤醒后一直不说话/VAD 漏检，超时回 IDLE 重新常听
 const MAX_LISTENING: Duration = Duration::from_secs(12);
-/// 唤醒命中块的 RMS 下限：房间环境声（键盘/视频/空调）实测 0.007–0.013，
-/// 真人对着麦克风喊"美丽" ≥0.02——但实测真人喊声落块可能低到 0.010（多音节
-/// 之间的安静缝隙恰好是关键词尾块）。0.010 是噪声门与灵敏度目前的折中，
-/// 最终仍归 #6 定制 KWS。
-const WAKE_MIN_RMS: f32 = 0.010;
 /// 空唤醒抑制：唤醒后 12s 内没有任何转写 → 10s 不再响应唤醒，压住连续自触发
 /// 风暴。曾设 30s，实测把真人的连续呼喊整段吞掉（2026-11-19 用户投诉灵敏度）。
 /// 空唤醒现在会出声回应（WAKE_NUDGE），用户能感知"她在"，10s 不应期可接受。
@@ -45,9 +40,11 @@ const EMPTY_WAKE_SUPPRESS: Duration = Duration::from_secs(10);
 /// 空唤醒回应话术：喊了名字没接话时的短应答（不走 LLM，零延迟）。产品语义：
 /// 喊名字必须有回应，否则用户以为没听到（多次"喊了没反应"投诉的根因）
 const WAKE_NUDGE: &str = "嗯？怎么啦？";
-/// VAD 语音确认窗：命中前的最近 1.5s 内必须有 VAD 判定的语音，否则视为脉冲噪声
-/// （真人喊"美丽"时 VAD hangover 会覆盖关键词尾块，1.5s 留足余量）
-const SPEECH_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
+/// VAD 语音确认窗：命中前的最近 3s 内必须有 VAD 判定的语音，否则视为脉冲噪声。
+/// 曾用 1.5s + RMS 能量门双判：实测真人快喊 0.00991 RMS 被能量门误杀（缝隙块），
+/// 且个别快喊 VAD 起始帧概率爬升慢、1.5s 窗 edge case 漏 latch——能量门取消
+/// （安静噪声同样过不了 VAD 确认，职责重复），窗口放宽 3s 覆盖 KWS 检测延迟。
+const SPEECH_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 
 /// 块 RMS（16k 单声道 f32）
 fn chunk_rms(chunk: &[f32]) -> f32 {
@@ -280,19 +277,16 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                     let suppressed = suppress_until.is_some_and(|t| Instant::now() < t);
                     if let Some(hit) = spotter.accept_waveform(&chunk) {
                         let rms = chunk_rms(&chunk);
-                        let in_speech_ctx =
-                            last_speech.is_some_and(|t| t.elapsed() <= SPEECH_CONFIRM_WINDOW);
-                        if rms < WAKE_MIN_RMS {
-                            // 噪声误唤醒：RMS 低于真人喊话下限，吃掉命中并安静 1.5s
+                        let speech_ago_ms = last_speech.map(|t| t.elapsed().as_millis() as u64);
+                        let in_speech_ctx = speech_ago_ms
+                            .is_some_and(|ms| ms <= SPEECH_CONFIRM_WINDOW.as_millis() as u64);
+                        if !in_speech_ctx {
+                            // 非语音上下文命中：脉冲噪声（敲击/碰撞）能量高但不是话。
+                            // 带 VAD latch 年龄诊断：真人喊也被拦说明 VAD 漏判快喊，
+                            // 下一步调 silero threshold（0.25 → 0.2 方向）
                             tracing::info!(
                                 rms = format_args!("{:.5}", rms),
-                                "wake hit rejected: below rms floor"
-                            );
-                            last_wake = Instant::now();
-                        } else if !in_speech_ctx {
-                            // 非语音上下文命中：脉冲噪声（敲击/碰撞）能量高但不是话
-                            tracing::info!(
-                                rms = format_args!("{:.5}", rms),
+                                speech_ago_ms = speech_ago_ms.unwrap_or(u64::MAX),
                                 "wake hit rejected: no speech context"
                             );
                             last_wake = Instant::now();

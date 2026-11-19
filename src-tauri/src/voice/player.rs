@@ -135,7 +135,6 @@ fn build_output<T>(
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
-    let channels = config.channels as usize;
     let state = Arc::clone(state);
     device
         .build_output_stream(
@@ -145,11 +144,11 @@ where
                     Ok(s) => s,
                     Err(_) => return,
                 };
-                for frame in out.chunks_mut(channels) {
-                    let s = st.queue.pop_front().unwrap_or(0.0);
-                    for slot in frame.iter_mut() {
-                        *slot = T::from_sample(s);
-                    }
+                // 队列与 out 同为声道交错布局（play_wav 按 L,R,L,R 展开），逐槽弹一个。
+                // 注意：不能按"每帧弹一个再复制到各声道"——入队量是出队量的 channels 倍，
+                // 会把播放拖慢 channels 倍（0.5 倍速 + 降调，M1-3.5b 实机踩过）。
+                for slot in out.iter_mut() {
+                    *slot = T::from_sample(st.queue.pop_front().unwrap_or(0.0));
                 }
                 if st.playing && st.queue.is_empty() {
                     st.playing = false; // 播完翻转：is_playing() 将返回 false

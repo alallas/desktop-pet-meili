@@ -485,10 +485,11 @@ fn consume(
                                     );
                                     suppress_until = Some(Instant::now() + EMPTY_WAKE_SUPPRESS);
                                 }
-                                // 流式出声（#23-b）：LLM 边生成边按句合成入队，
-                                // 首音 ≈ 第一句生成+合成（~4–8s）而非整句完（10–17s）。
-                                // 期间引擎线程在流内，KWS 暂停——打断窗口只有 SPEAKING 态
-                                // （同非流式的思考阻塞期，barge-in 语义不回归）。
+                                // 流式出声（#23-b + #32 逗号软切）：LLM 边生成边按
+                                // 气口合成入队，首音 ≈ 口癖尾巴生成+合成（~1.5–3s）
+                                // 而非整句完（8–17s）。期间引擎线程在流内，KWS 暂停
+                                // ——打断窗口只有 SPEAKING 态（同非流式思考阻塞期，
+                                // barge-in 语义不回归）。
                                 let mut audio_enqueued = false;
                                 let mut first_audio_ms: Option<u128> = None;
                                 if meaningful && player.is_none() {

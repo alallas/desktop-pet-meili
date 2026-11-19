@@ -2,7 +2,7 @@
 //! 本地云端同一人设规则（云端通道 M1-4 接入后复用本模块的 persona 装配）。
 //!
 //! 产品 §4.1 人设卡：meili，小水獭，潮间带收容所"老员工"引导员；
-//! 口癖"然后就是"（产品设计 L369 定稿，不刷屏）；元气、话多、爱收藏石头；
+//! 口癖"美丽认为"（2026-11-19 用户改定，第三人称自称垫词，不刷屏）；元气、话多、爱收藏石头；
 //! 温暖陪伴调性。M0 实测：Qwen3-4B 关思考（enable_thinking=false）+ 短回复
 //! prompt，persona 表现合格。
 
@@ -15,8 +15,8 @@ use sidecar::Sidecar;
 
 /// 人设 system prompt（产品 §4.1；改口癖/性格只改这里）
 const SYSTEM_PROMPT: &str = "你是「美丽」（meili），「潮间带」海洋收容所里的一只小水獭，\
-收容所的引导员老员工。口癖是\"然后就是\"——朋友聊天式的口头垫词，自然地挂在嘴边，\
-每两三句里最多出现一次，不刻意刷屏。性格元气、好奇、话多、爱收藏，\
+收容所的引导员老员工。口癖是\"美丽认为\"——以第三人称自称的口头垫词，\
+句首自然带出，每两三句里最多出现一次，不刻意刷屏。性格元气、好奇、话多、爱收藏，\
 口袋里总有几块最喜欢的石头。你在主人的电脑桌面上陪伴他、观察他的生活。\
 每次回复不超过两句话，语气温暖，像朋友而不是助理。";
 
@@ -27,7 +27,7 @@ const HISTORY_TURNS: usize = 4;
 const MAX_TOKENS: u32 = 90;
 
 /// 思考层不可用时的话术兜底（保住"喊了有回应"的闭环）
-pub const FALLBACK_REPLY: &str = "然后就是我刚刚没太听清，你可以再说一遍吗？";
+pub const FALLBACK_REPLY: &str = "美丽认为我刚刚没太听清，你可以再说一遍吗？";
 
 /// 对话思考器：持有 sidecar 生命周期 + 短期记忆。
 pub struct Thinker {
@@ -181,15 +181,22 @@ impl Thinker {
 }
 
 /// 句切分器（流式管线的语言逻辑层）：push 增量文本，凑齐一句（含句尾标点）
-/// 就吐出；flush 把无标点收尾的尾巴整段吐出。只按句末标点切——逗号不切，
-/// 否则口语回复会被剁得太碎，TTS 每句气口太短。
+/// 就吐出；flush 把无标点收尾的尾巴整段吐出。句末标点硬切；逗号软切——
+/// 实测（#32，2026-11-19）美丽回复多为单句无句末标点，硬切等于整句生成完
+/// 才出声（首音 3~7s）；逗号软切把首音提前到第一个气口（4B 实测 0.9~1.2s），
+/// 代价是 TTS 按气口分段（逗号停顿本就自然）。最短长度阈值防 1~3 字碎片。
 struct SentenceSplitter {
     buf: String,
 }
 
 impl SentenceSplitter {
-    /// 句末标点（中文全角 + 英文半角 + 换行）
+    /// 句末标点（中文全角 + 英文半角 + 换行）——硬切
     const DELIMS: &'static [char] = &['。', '！', '？', '；', '!', '?', ';', '\n'];
+    /// 逗号（全角/半角）——软切
+    const COMMA_DELIMS: &'static [char] = &['，', ','];
+    /// 逗号软切的最短前缀：自上个切点起攒够这么多字符才允许在逗号处断
+    /// （"美丽认为，"5 字可达；防"嗯，""好，"这类 1~3 字碎片被剁出来）
+    const COMMA_MIN_CHARS: usize = 4;
 
     fn new() -> Self {
         Self { buf: String::new() }
@@ -199,13 +206,18 @@ impl SentenceSplitter {
     fn push(&mut self, delta: &str) -> Vec<String> {
         self.buf.push_str(delta);
         let mut out = Vec::new();
-        // char_indices：delim 是多字节字符，得按字符边界切（find 返回的起始
-        // 字节会把标点拦腰截断）
-        while let Some((byte_idx, ch)) = self
-            .buf
-            .char_indices()
-            .find(|(_, c)| Self::DELIMS.contains(c))
-        {
+        // 反复找最近的合法切点：硬标点无条件切；逗号要求前缀达最短长度
+        // （char_indices：delim 是多字节字符，得按字符边界切，find 返回的
+        // 起始字节会把标点拦腰截断）
+        loop {
+            let found = self.buf.char_indices().find(|(i, c)| {
+                if Self::DELIMS.contains(c) {
+                    return true;
+                }
+                Self::COMMA_DELIMS.contains(c)
+                    && self.buf[..*i].chars().count() >= Self::COMMA_MIN_CHARS
+            });
+            let Some((byte_idx, ch)) = found else { break };
             let cut_end = byte_idx + ch.len_utf8();
             let cut = self.buf[..cut_end].trim().to_string();
             self.buf.drain(..cut_end);
@@ -244,7 +256,7 @@ mod tests {
         assert_eq!(arr.len(), 6);
         assert_eq!(arr[0]["role"], "system");
         assert!(
-            arr[0]["content"].as_str().unwrap().contains("然后就是"),
+            arr[0]["content"].as_str().unwrap().contains("美丽认为"),
             "人设 prompt 必须含口癖"
         );
         assert_eq!(arr[1]["content"], "你好");
@@ -264,14 +276,32 @@ mod tests {
         assert_eq!(arr[1]["role"], "user");
     }
 
-    /// 句切分：跨块拼句、多条同批、逗号不切、flush 收尾
+    /// 句切分：跨块拼句、多条同批、flush 收尾。3 字前缀不达逗号软切阈值，
+    /// 逗号不切（#32 改了逗号行为，此用例保留作阈值下限护栏）
     #[test]
     fn splitter_waits_for_delimiter() {
         let mut s = SentenceSplitter::new();
-        assert!(s.push("你好呀，").is_empty(), "逗号不切句");
+        assert!(s.push("你好呀，").is_empty(), "前缀 3 字 < 阈值，逗号不切");
         let out = s.push("今天天气不错。我在捡石头！你呢");
         assert_eq!(out, vec!["你好呀，今天天气不错。", "我在捡石头！"]);
         assert_eq!(s.flush().as_deref(), Some("你呢"), "尾巴无标点 flush 出");
+    }
+
+    /// 逗号软切（#32）：前缀凑满最短长度即在逗号处断（口癖尾巴 0.9~1.2s
+    /// 先送 TTS，首音提前）；不足阈值不切成碎片
+    #[test]
+    fn splitter_comma_soft_cut() {
+        let mut s = SentenceSplitter::new();
+        let out = s.push("美丽认为，今天天气真不错。你呢");
+        assert_eq!(out, vec!["美丽认为，", "今天天气真不错。"]);
+        assert_eq!(s.flush().as_deref(), Some("你呢"));
+
+        let mut short = SentenceSplitter::new();
+        assert!(
+            short.push("好的，").is_empty(),
+            "前缀 2 字 < 阈值，逗号不切"
+        );
+        assert_eq!(short.push("就这样吧。"), vec!["好的，就这样吧。"]);
     }
 
     /// 句切分：半角标点与换行也算句末；纯标点残渣不吐

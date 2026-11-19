@@ -45,6 +45,9 @@ const EMPTY_WAKE_SUPPRESS: Duration = Duration::from_secs(10);
 /// 空唤醒回应话术：喊了名字没接话时的短应答（不走 LLM，零延迟）。产品语义：
 /// 喊名字必须有回应，否则用户以为没听到（多次"喊了没反应"投诉的根因）
 const WAKE_NUDGE: &str = "嗯？怎么啦？";
+/// VAD 语音确认窗：命中前的最近 1.5s 内必须有 VAD 判定的语音，否则视为脉冲噪声
+/// （真人喊"美丽"时 VAD hangover 会覆盖关键词尾块，1.5s 留足余量）
+const SPEECH_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 
 /// 块 RMS（16k 单声道 f32）
 fn chunk_rms(chunk: &[f32]) -> f32 {
@@ -245,6 +248,8 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
     let mut vad_buf: Vec<f32> = Vec::new();
     // 初始即允许首次命中（now() - cooldown）
     let mut last_wake = Instant::now() - WAKE_COOLDOWN;
+    // 最近一次 VAD 判定为语音的时间（None = 尚无）
+    let mut last_speech: Option<Instant> = None;
     // 空唤醒抑制截止戳：None = 未抑制（初始不抑制，避免启动后 30s 不应期）
     let mut suppress_until: Option<Instant> = None;
     let mut state = State::Idle;
@@ -261,15 +266,34 @@ fn consume(bus: EventBus, parts: &mut EngineParts, rx: Receiver<Vec<f32>>) {
                 State::Idle | State::Speaking => {
                     // 注意：曾在此加"SMTC 播放中暂停 KWS"（commit e526cbb），被用户否决
                     // （2026-11-19："播放的时候就先那样"）——放歌时唤醒照常工作，
-                    // 歌词谐音误唤醒靠三重门兜着，正经解法是 AEC 回声消除（待办 #11）。
+                    // 歌词谐音误唤醒靠门控兜着，正经解法是 AEC 回声消除（待办 #11）。
+                    //
+                    // VAD 常喂（IDLE/SPEAKING 也喂）：KWS 命中必须落在"语音上下文"
+                    // 里才被接受——真人喊"美丽"必被 VAD 判为语音，而键盘敲击/
+                    // 椅子声等脉冲噪声的能量虽高（实测 RMS 0.06-0.09 也触发 KWS），
+                    // VAD 不认为是语音。段在此态只是副产品，直接丢弃。
+                    feed_vad(vad, &mut vad_buf, &chunk);
+                    if vad.in_speech() {
+                        last_speech = Some(Instant::now());
+                    }
+                    while vad.pop_segment().is_some() {}
                     let suppressed = suppress_until.is_some_and(|t| Instant::now() < t);
                     if let Some(hit) = spotter.accept_waveform(&chunk) {
                         let rms = chunk_rms(&chunk);
+                        let in_speech_ctx =
+                            last_speech.is_some_and(|t| t.elapsed() <= SPEECH_CONFIRM_WINDOW);
                         if rms < WAKE_MIN_RMS {
                             // 噪声误唤醒：RMS 低于真人喊话下限，吃掉命中并安静 1.5s
                             tracing::info!(
                                 rms = format_args!("{:.5}", rms),
                                 "wake hit rejected: below rms floor"
+                            );
+                            last_wake = Instant::now();
+                        } else if !in_speech_ctx {
+                            // 非语音上下文命中：脉冲噪声（敲击/碰撞）能量高但不是话
+                            tracing::info!(
+                                rms = format_args!("{:.5}", rms),
+                                "wake hit rejected: no speech context"
                             );
                             last_wake = Instant::now();
                         } else if suppressed {

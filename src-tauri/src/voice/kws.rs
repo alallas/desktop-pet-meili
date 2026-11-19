@@ -181,9 +181,10 @@ impl KeywordSpotter {
             },
         };
         // threshold：token 后验阈值，越低越灵敏误唤醒越高。
-        // 0.1 是 c-api.h 文档示例默认值，实测误唤醒约 1 次/分钟（2026-11-19 157 次/3h，
-        // 其中大量来自会议/视频环境声命中其他关键词），收紧到 0.25 后须经
-        // kws_detects_meili_in_m0_sample + #6 24h 实测双重验证。
+        // 0.1 = c-api.h 文档示例值：误唤醒 ~1 次/分钟（2026-11-19 157 次/3h，主因是
+        // keywords.txt 带着 12 个示例关键词，已裁剪至仅"美丽"）；0.25 实测矫枉过正，
+        // 用户连喊多次只命中 2/10+（2026-11-19 15:33）。0.15 为两者折中，
+        // 须经 #6 24h 负样本实测定最终值。
         let config = SherpaOnnxKeywordSpotterConfig {
             feat_config: SherpaOnnxFeatureConfig {
                 sample_rate: 16000,
@@ -193,7 +194,7 @@ impl KeywordSpotter {
             max_active_paths: 4,
             num_trailing_blanks: 1,
             keywords_score: 3.0,
-            keywords_threshold: 0.25,
+            keywords_threshold: 0.15,
             keywords_file: keywords.as_ptr(),
             keywords_buf: std::ptr::null(),
             keywords_buf_size: 0,

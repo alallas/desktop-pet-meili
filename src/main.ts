@@ -84,8 +84,12 @@ new GLTFLoader().load("/models/Soldier.glb", (gltf) => {
   actions.get("Idle")?.play();
 
   model.traverse((o) => {
-    if (!headBone && o instanceof THREE.Bone && o.name === "mixamorig:Head") headBone = o;
+    // GLTFLoader 的 PropertyBinding.sanitizeNodeName 会删掉冒号等保留字符，
+    // 骨骼名 "mixamorig:Head" 加载后变成 "mixamorigHead"（2026-11-19 扭头失效根因）
+    if (!headBone && o instanceof THREE.Bone && ["mixamorig:Head", "mixamorigHead"].includes(o.name))
+      headBone = o;
   });
+  void commands.debugLog(`[gaze] headBone=${headBone?.name ?? "NOT FOUND"}`).catch(() => {});
 
   renderer.setAnimationLoop(tick);
 });

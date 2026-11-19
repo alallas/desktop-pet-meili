@@ -31,40 +31,64 @@ pub struct Player {
 
 impl Player {
     /// 打开默认输出设备并启动输出流。失败返回 Err（调用方降级：无声音）。
+    ///
+    /// 候选配置遍历（坑 39）：Senary 扬声器实测 default_output_config 报 F32
+    /// 48kHz，但按它 build 流必失败 0x8889000F（WASAPI 设备期不支持）——故默认
+    /// 配置优先、失败后回退遍历 supported_output_configs 逐一尝试。
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or("无默认输出设备（扬声器）")?;
-        let config = device
-            .default_output_config()
-            .map_err(|e| format!("读输出配置失败: {e}"))?;
-        let out_rate = config.sample_rate().0 as f64;
-        let channels = config.channels() as usize;
-        tracing::info!(
-            device = %device.name().unwrap_or_default(),
-            rate = out_rate,
-            channels = channels,
-            format = ?config.sample_format(),
-            "tts player: output device"
-        );
-
         let state = Arc::new(Mutex::new(PlayState {
             queue: VecDeque::new(),
             playing: false,
         }));
-        let cb_state = Arc::clone(&state);
-        let n_ch = channels;
 
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                build_output::<f32>(&device, &config.config(), n_ch, cb_state)?
+        let mut attempts: Vec<(cpal::StreamConfig, cpal::SampleFormat)> = Vec::new();
+        if let Ok(def) = device.default_output_config() {
+            attempts.push((def.config(), def.sample_format()));
+        }
+        if let Ok(ranges) = device.supported_output_configs() {
+            for range in ranges {
+                attempts.push((range.with_max_sample_rate().config(), range.sample_format()));
             }
-            cpal::SampleFormat::I16 => {
-                build_output::<i16>(&device, &config.config(), n_ch, cb_state)?
+        }
+        if attempts.is_empty() {
+            return Err("扬声器无任何可用输出配置".into());
+        }
+
+        let mut last_err = String::new();
+        let mut built = None;
+        for (cfg, fmt) in &attempts {
+            let res = match fmt {
+                cpal::SampleFormat::F32 => build_output::<f32>(&device, cfg, &state),
+                cpal::SampleFormat::I16 => build_output::<i16>(&device, cfg, &state),
+                other => {
+                    last_err = format!("跳过不支持格式 {other:?}");
+                    continue;
+                }
+            };
+            match res {
+                Ok(stream) => {
+                    tracing::info!(
+                        rate = cfg.sample_rate.0,
+                        channels = cfg.channels,
+                        format = ?fmt,
+                        "tts player: output stream up (fallback walk)"
+                    );
+                    built = Some((stream, cfg.sample_rate.0 as f64, cfg.channels as usize));
+                    break;
+                }
+                Err(e) => last_err = format!("{fmt:?} @{}ch: {e}", cfg.channels),
             }
-            other => return Err(format!("不支持的输出采样格式 {other:?}")),
-        };
+        }
+        let (stream, out_rate, channels) = built.ok_or_else(|| {
+            format!(
+                "构建输出流失败（{} 个候选均失败）: {last_err}",
+                attempts.len()
+            )
+        })?;
         stream.play().map_err(|e| format!("播放流启动失败: {e}"))?;
         Ok(Self {
             stream,
@@ -115,12 +139,13 @@ impl Player {
 fn build_output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    channels: usize,
-    state: Arc<Mutex<PlayState>>,
+    state: &Arc<Mutex<PlayState>>,
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
+    let channels = config.channels as usize;
+    let state = Arc::clone(state);
     device
         .build_output_stream(
             config,
@@ -142,7 +167,7 @@ where
             |e| tracing::error!("tts playback error: {e}"),
             None,
         )
-        .map_err(|e| format!("构建输出流失败: {e}"))
+        .map_err(|e| format!("{e}"))
 }
 
 /// 解析 16-bit PCM WAV（RIFF 遍历）。返回 (采样率, f32 单声道采样 [-1,1])。

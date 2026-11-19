@@ -40,6 +40,10 @@ const EMPTY_WAKE_SUPPRESS: Duration = Duration::from_secs(10);
 /// 空唤醒回应话术：喊了名字没接话时的短应答（不走 LLM，零延迟）。产品语义：
 /// 喊名字必须有回应，否则用户以为没听到（多次"喊了没反应"投诉的根因）
 const WAKE_NUDGE: &str = "嗯？怎么啦？";
+/// 碎语回应话术：唤醒被接受、ASR 只转出单音节噪声时的追问（不走 LLM，零延迟）。
+/// 2026-11-19 排查实锤：三次"喊了没反应"均因旧行为"短转写静默丢弃"——唤醒已被
+/// 接受（用户看到跳跃气泡）却没有任何声音反馈。唤醒被接受后不允许零反馈。
+const SHORT_NUDGE: &str = "嗯？我没太听清，再说一遍？";
 /// VAD 语音确认窗：命中前的最近 3s 内必须有 VAD 判定的语音，否则视为脉冲噪声。
 /// 曾用 1.5s + RMS 能量门双判：实测真人快喊 0.00991 RMS 被能量门误杀（缝隙块），
 /// 且个别快喊 VAD 起始帧概率爬升慢、1.5s 窗 edge case 漏 latch——能量门取消
@@ -472,10 +476,14 @@ fn consume(
                                 let meaningful =
                                     text.chars().filter(|c| c.is_alphanumeric()).count() >= 2;
                                 if !meaningful {
+                                    // 与空唤醒超时 nudge 同机制：出声追问 + 10s 抑制压
+                                    // 噪声风暴。抑制无论 TTS 成败都生效（播放器缺失时
+                                    // 也要压住连续自触发）
                                     tracing::info!(
                                         text = %text,
-                                        "transcript too short, skip thinking"
+                                        "transcript too short, nudge instead of silent skip"
                                     );
+                                    suppress_until = Some(Instant::now() + EMPTY_WAKE_SUPPRESS);
                                 }
                                 // 流式出声（#23-b）：LLM 边生成边按句合成入队，
                                 // 首音 ≈ 第一句生成+合成（~4–8s）而非整句完（10–17s）。
@@ -561,7 +569,17 @@ fn consume(
                                         }
                                     }
                                 }
-                                state = if audio_enqueued {
+                                // 碎语：出声追问（用户可再喊一次名字重试）；
+                                // 正常：有音频则播完回 IDLE，无音频（合成失败）直接回
+                                state = if !meaningful {
+                                    if speak_reply(tts.as_mut(), player.as_mut(), SHORT_NUDGE)
+                                        .is_ok()
+                                    {
+                                        State::Speaking
+                                    } else {
+                                        State::Idle
+                                    }
+                                } else if audio_enqueued {
                                     State::Speaking
                                 } else {
                                     State::Idle

@@ -17,16 +17,14 @@ use crate::perception::local_hour;
 
 use super::map::{fill_template, BehaviorMap, MapEntry};
 
-/// 频率档（产品 §5.1 存在感光谱的开口频率维度）
+/// 频率档（产品 §5.1 存在感光谱的开口频率维度；语音调节指令消费，见 voice/intent.rs）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrequencyTier {
-    /// 别吵我：全沉淀，不放行（v1 由语音调节指令接入后消费）
-    #[allow(dead_code)]
+    /// 别吵我：全沉淀，不放行
     Silent,
     /// 默认：P0+P1 放行，全局冷却 30min
     Balanced,
-    /// 多陪我聊聊：全放行，全局冷却 12min（v1 由语音调节指令接入后消费）
-    #[allow(dead_code)]
+    /// 多陪我聊聊：全放行，全局冷却 12min
     Chatty,
 }
 
@@ -304,6 +302,14 @@ impl GateEngine {
             .for_each(|t| *t = Instant::now());
         self.queue.clear();
         tracing::info!("behavior gates reset (debug)");
+    }
+
+    /// 语音调节指令入口："今天别吵我"/"多陪我聊聊" → 切频率档
+    pub fn set_tier(&mut self, tier: FrequencyTier) {
+        if self.tier != tier {
+            tracing::info!(from = ?self.tier, to = ?tier, "behavior tier switched (voice command)");
+        }
+        self.tier = tier;
     }
 }
 

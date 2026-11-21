@@ -103,11 +103,11 @@ fn main() {
             // debug_reset_behavior）经 tauri::State 取用
             app.manage(bus.clone());
             let (control_tx, control_rx) = std::sync::mpsc::sync_channel::<behavior::Control>(8);
-            app.manage(control_tx);
+            app.manage(control_tx.clone());
             // M1-3.2 + M1-5：语音引擎（常驻线程）+ 行为引擎（事件 → 四道闸 → 台词）。
             // 台词通道：行为引擎产、语音引擎 IDLE 态消费（满员即丢，闸已限频）
             let (comment_tx, comment_rx) = std::sync::mpsc::sync_channel::<String>(8);
-            voice::engine::start(bus.clone(), comment_rx);
+            voice::engine::start(bus.clone(), comment_rx, control_tx.clone());
             behavior::start(bus.clone(), control_rx, comment_tx);
             // M1-5 场景模拟器：全局热键 Ctrl+Alt+N（主窗口不聚焦，热键只能 Rust 侧注册）
             dev_hotkey::start(app.handle().clone());

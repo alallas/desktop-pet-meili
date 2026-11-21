@@ -25,10 +25,12 @@ const TICK: Duration = Duration::from_secs(5);
 /// 控制消息的轮询粒度：远小于 TICK，让调试重置近乎即时生效
 const CONTROL_POLL: Duration = Duration::from_millis(200);
 
-/// 行为引擎调试控制（场景模拟器配套；Sender 侧经 tauri State 暴露给 IPC）
+/// 行为引擎控制（场景模拟器 + 语音调节指令共用通道；Sender 侧经 tauri State 暴露）
 pub enum Control {
-    /// 四道闸冷却清零（等价"回到刚启动"）
+    /// 四道闸冷却清零（场景模拟器；等价"回到刚启动"）
     ResetCooldowns,
+    /// 切频率档（语音调节指令："今天别吵我"/"多陪我聊聊"）
+    SetTier(FrequencyTier),
 }
 
 /// 启动行为引擎线程。comment_tx 送语音引擎（voice::engine::start 的入参）
@@ -55,6 +57,7 @@ pub fn start(
             while let Ok(c) = control_rx.try_recv() {
                 match c {
                     Control::ResetCooldowns => gates.reset_cooldowns(),
+                    Control::SetTier(tier) => gates.set_tier(tier),
                 }
             }
             match rx.recv_timeout(CONTROL_POLL) {

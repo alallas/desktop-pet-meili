@@ -58,9 +58,14 @@ fn chunk_rms(chunk: &[f32]) -> f32 {
 
 /// 启动语音引擎（装配层唯一入口，进程常驻）。失败只记日志不 panic——
 /// 无麦克风的环境桌宠其余功能不受影响（装配层不重试）。
-pub fn start(bus: EventBus, comments: Receiver<String>) {
+/// behavior_ctrl：语音调节指令（voice/intent.rs）发往行为引擎的控制通道
+pub fn start(
+    bus: EventBus,
+    comments: Receiver<String>,
+    behavior_ctrl: SyncSender<crate::behavior::Control>,
+) {
     thread::spawn(move || {
-        if let Err(e) = run(bus, comments) {
+        if let Err(e) = run(bus, comments, behavior_ctrl) {
             tracing::error!("voice engine stopped: {e:#}");
         }
     });
@@ -69,6 +74,7 @@ pub fn start(bus: EventBus, comments: Receiver<String>) {
 fn run(
     bus: EventBus,
     comments: Receiver<String>,
+    behavior_ctrl: SyncSender<crate::behavior::Control>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model_dir = root.join("../models/kws");
@@ -134,7 +140,7 @@ fn run(
         tts: &mut tts,
         player: &mut player,
     };
-    consume(bus, &mut parts, rx, &mut capture, comments);
+    consume(bus, &mut parts, rx, &mut capture, comments, &behavior_ctrl);
     Ok(())
 }
 
@@ -304,6 +310,7 @@ fn consume(
     rx: Receiver<Vec<f32>>,
     capture: &mut CaptureHandle,
     comments: Receiver<String>,
+    behavior_ctrl: &SyncSender<crate::behavior::Control>,
 ) {
     let spotter = &mut *parts.spotter;
     let vad = &mut *parts.vad;
@@ -515,7 +522,32 @@ fn consume(
                                 if meaningful {
                                     ensure_player(player);
                                 }
+                                // M1-5 语音调节指令：命中即拦截——不送 LLM 闲聊，
+                                // 切行为档位 + 模板确认台词（"今天别吵我"/"多陪我聊聊"）
+                                let mut tier_command = false;
                                 if meaningful {
+                                    if let Some((tier, ack)) =
+                                        super::intent::match_tier_command(&text)
+                                    {
+                                        tier_command = true;
+                                        if let Err(e) = behavior_ctrl
+                                            .try_send(crate::behavior::Control::SetTier(tier))
+                                        {
+                                            tracing::error!(
+                                                "tier command control send failed: {e}"
+                                            );
+                                        }
+                                        tracing::info!(
+                                            ?tier,
+                                            text = %text,
+                                            "tier command matched, intercept before llm"
+                                        );
+                                        if speak_reply(tts.as_mut(), player.as_mut(), ack).is_ok() {
+                                            audio_enqueued = true;
+                                        }
+                                    }
+                                }
+                                if meaningful && !tier_command {
                                     if let Some(thinker) = thinker.as_deref_mut() {
                                         let t1 = Instant::now();
                                         let think_result =

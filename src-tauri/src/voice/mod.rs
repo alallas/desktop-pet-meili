@@ -13,6 +13,7 @@
 
 pub mod asr;
 pub mod engine;
+pub mod intent;
 pub mod kws;
 pub mod player;
 pub mod resample;

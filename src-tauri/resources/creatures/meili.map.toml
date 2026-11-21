@@ -1,0 +1,76 @@
+# 「潮间带」事件映射表：美丽（meili）——事件 → 反应（生物性格的主载体）
+# 改反应只改这个文件，不用重新编译——启动时加载，格式错误的条目告警跳过。
+# 热更（改完不重启）是待办 #34。
+#
+# 字段：
+#   on        事件类型名，封闭集合见 EventKind::as_str（ipc.rs），写错整条跳过
+#   when      payload 条件过滤（可选）：{ "app": ["Code", "Kimi"] } = 字段值命中其一
+#   priority  重要级：0 重要（电量告警级）/ 1 有趣 / 2 背景（默契档只放行 0+1）
+#   cooldown_min  同类冷却分钟数（可选，默认 5）
+#   say       台词变体数组，命中随机一条；{{field}} 槽位取事件 payload 的
+#             字符串字段（字段缺失则该变体不选）。v1 不做 mood 类虚拟槽（#定案）
+#   anim      小动作（M1-6 表现层落地前预留，写了也不执行）
+
+# ---------- 启动与离开 ----------
+[[map]]
+on = "booted"
+priority = 0
+say = ["潮间带今天也开张啦。", "你回来啦，美丽等了有一会儿了。"]
+
+[[map]]
+on = "lock_state_changed"
+when = { locked = [false] }
+priority = 1
+say = ["回来啦？离开的这段时间，美丽把石头都数了一遍。", "欢迎回来！刚才有一只海鸥路过，被我盯走了。"]
+
+[[map]]
+on = "lock_state_changed"
+when = { locked = [true] }
+priority = 1
+say = ["去忙吧，我替你看家。", "锁屏啦，那美丽趴一会儿。"]
+
+# ---------- 前台与空闲 ----------
+[[map]]
+on = "foreground_switched"
+priority = 1
+cooldown_min = 10
+say = ["换到{{app}}了诶。", "{{app}}……这个美丽也要看看。", "又要开工啦？美丽在旁边给你打气。"]
+
+[[map]]
+on = "idle_state_changed"
+when = { is_idle = [true] }
+priority = 1
+say = ["不动了……是在想事情吗？", "你不动，美丽也开始犯困了。"]
+
+# ---------- 媒体陪看陪听 ----------
+[[map]]
+on = "media_playback_changed"
+when = { state = ["playing"] }
+priority = 1
+cooldown_min = 8
+say = ["在听{{title}}呀。", "这首歌好耳熟，是{{artist}}的吧？", "放歌啦放歌啦！"]
+
+# ---------- 电源与网络（P0：她真的在意你） ----------
+[[map]]
+on = "power_state_changed"
+when = { charging = [true] }
+priority = 0
+say = ["插上电啦——美丽也精神了！", "充电线一插，像给潮间带涨潮了一样。"]
+
+[[map]]
+on = "power_state_changed"
+when = { ac_online = [false] }
+priority = 0
+say = ["改用电池了？那省着点用哦。", "拔电源了，美丽看着电量有点紧张。"]
+
+[[map]]
+on = "network_changed"
+when = { connected = [false] }
+priority = 0
+say = ["网断了！潮间带和外海失去联系了……", "断网了诶，不过美丽还在。"]
+
+[[map]]
+on = "network_changed"
+when = { connected = [true] }
+priority = 1
+say = ["网回来了，海浪又通了。", "连上啦连上啦。"]

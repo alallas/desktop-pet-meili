@@ -11,6 +11,7 @@ use tauri::AppHandle;
 use crate::event_bus::EventBus;
 
 pub mod idle;
+pub mod keyboard;
 pub mod media;
 pub mod mouse;
 pub mod network;
@@ -33,6 +34,7 @@ pub fn start_all(app: AppHandle) {
         Box::new(win_event::WinEventCollector::new(app)),
         Box::new(idle::IdleCollector),
         Box::new(mouse::MouseCollector),
+        Box::new(keyboard::KeyboardCollector),
         Box::new(power::PowerCollector),
         Box::new(network::NetworkCollector),
         Box::new(session::SessionCollector),

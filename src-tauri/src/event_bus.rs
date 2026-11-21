@@ -23,6 +23,8 @@ const MOVE_COOLDOWN: Duration = Duration::from_millis(120);
 pub struct EventBus {
     app: tauri::AppHandle,
     cooling: std::sync::Arc<Mutex<Cooling>>,
+    /// Rust 侧订阅者（M1-5 行为引擎）：消费**过传输削峰后**的同一事件流
+    subscribers: std::sync::Arc<Mutex<Vec<std::sync::mpsc::SyncSender<StdEvent>>>>,
 }
 
 impl EventBus {
@@ -30,7 +32,18 @@ impl EventBus {
         Self {
             app,
             cooling: std::sync::Arc::new(Mutex::new(Cooling::new(MOVE_COOLDOWN))),
+            subscribers: std::sync::Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Rust 侧订阅事件流（行为引擎等进程内消费者）。有界通道，慢消费者丢事件
+    /// 不阻塞总线（publish 里 try_send）；接收端被丢弃的订阅者在扇出时摘除
+    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<StdEvent> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(256);
+        if let Ok(mut subs) = self.subscribers.lock() {
+            subs.push(tx);
+        }
+        rx
     }
 
     /// 采集器投递入口。返回 false 表示被传输级削峰拦截。
@@ -53,6 +66,23 @@ impl EventBus {
             id = %event.id,
             "event"
         );
+        // Rust 侧扇出（行为引擎）：满员丢事件不阻塞总线；死订阅者摘除。
+        // 在 WebView emit 之前做——emit 会 move 掉 event
+        if let Ok(mut subs) = self.subscribers.lock() {
+            let mut dead = Vec::new();
+            for (i, sub) in subs.iter().enumerate() {
+                if let Err(e) = sub.try_send(event.clone()) {
+                    if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
+                        tracing::warn!("behavior subscriber lagging, event dropped");
+                    } else {
+                        dead.push(i);
+                    }
+                }
+            }
+            for i in dead.into_iter().rev() {
+                subs.remove(i);
+            }
+        }
         // 失败只记 warn 不 panic（WebView 未就绪等瞬态）
         if let Err(e) = self.app.emit(EventStream::NAME, &EventStream(event)) {
             tracing::warn!("event emit failed: {e}");

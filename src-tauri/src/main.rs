@@ -2,6 +2,7 @@
 
 //! 装配层 only（工程规范 §1）：plugin/路由注册与启动顺序，不放逻辑。
 
+mod behavior;
 mod cloud;
 mod db;
 mod debounce;
@@ -90,8 +91,17 @@ fn main() {
             // M1-2：系统层事件采集（前台窗口钩子 + 空闲轮询），统一投事件总线；
             // 其余采集器（鼠标/SMTC/电源/网络/锁屏）后续按提交增量接入 start_all。
             event_collector::start_all(app.handle().clone());
-            // M1-3.2：语音引擎（麦克风 → KWS 唤醒 → WakeWord 事件），常驻线程
-            voice::engine::start(crate::event_bus::EventBus::new(app.handle().clone()));
+            // M1-3.2 + M1-5：语音引擎（常驻线程）+ 行为引擎（事件 → 四道闸 → 台词）。
+            // 台词通道：行为引擎产、语音引擎 IDLE 态消费（满员即丢，闸已限频）
+            let (comment_tx, comment_rx) = std::sync::mpsc::sync_channel::<String>(8);
+            voice::engine::start(
+                crate::event_bus::EventBus::new(app.handle().clone()),
+                comment_rx,
+            );
+            behavior::start(
+                crate::event_bus::EventBus::new(app.handle().clone()),
+                comment_tx,
+            );
             // M1-1：事件通道样例——启动完成事件（ping-pong 的另一半在前端 listen）。
             // 延迟 1s 发射：setup 阶段 WebView 尚未加载，立即发会被错过（事件不排队）。
             builder.mount_events(app);

@@ -58,15 +58,18 @@ fn chunk_rms(chunk: &[f32]) -> f32 {
 
 /// 启动语音引擎（装配层唯一入口，进程常驻）。失败只记日志不 panic——
 /// 无麦克风的环境桌宠其余功能不受影响（装配层不重试）。
-pub fn start(bus: EventBus) {
+pub fn start(bus: EventBus, comments: Receiver<String>) {
     thread::spawn(move || {
-        if let Err(e) = run(bus) {
+        if let Err(e) = run(bus, comments) {
             tracing::error!("voice engine stopped: {e:#}");
         }
     });
 }
 
-fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run(
+    bus: EventBus,
+    comments: Receiver<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model_dir = root.join("../models/kws");
     let dir = model_dir.to_str().ok_or("模型路径非 UTF-8")?;
@@ -131,7 +134,7 @@ fn run(bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tts: &mut tts,
         player: &mut player,
     };
-    consume(bus, &mut parts, rx, &mut capture);
+    consume(bus, &mut parts, rx, &mut capture, comments);
     Ok(())
 }
 
@@ -300,6 +303,7 @@ fn consume(
     parts: &mut EngineParts,
     rx: Receiver<Vec<f32>>,
     capture: &mut CaptureHandle,
+    comments: Receiver<String>,
 ) {
     let spotter = &mut *parts.spotter;
     let vad = &mut *parts.vad;
@@ -348,6 +352,22 @@ fn consume(
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        // 行为引擎台词注入（M1-5）：仅 IDLE 态接收——不打断倾听与对话，
+        // 说正中（SPEAKING）的评论由行为侧闸控丢弃（通道满即丢）
+        if matches!(state, State::Idle) {
+            if let Ok(text) = comments.try_recv() {
+                ensure_player(player);
+                match speak_reply(tts.as_mut(), player.as_mut(), &text) {
+                    Ok(()) => {
+                        // 复用 ReplyReady 让前端/调试页看到台词文本（M1-6 气泡 UI 吃同一事件）
+                        publish_reply(&bus, &text, 0);
+                        tracing::info!("behavior comment speaking");
+                        state = State::Speaking;
+                    }
+                    Err(e) => tracing::warn!("behavior comment speak failed: {e:#}"),
+                }
+            }
         }
         while buf.len() >= CHUNK_SAMPLES {
             let chunk: Vec<f32> = buf.drain(..CHUNK_SAMPLES).collect();
@@ -492,18 +512,8 @@ fn consume(
                                 // barge-in 语义不回归）。
                                 let mut audio_enqueued = false;
                                 let mut first_audio_ms: Option<u128> = None;
-                                if meaningful && player.is_none() {
-                                    // 输出设备可能在使用中恢复（耳机插拔/音频栈自愈）：
-                                    // player 缺失时先 lazy 重建一次，不用重启应用
-                                    match super::player::Player::new() {
-                                        Ok(p) => {
-                                            tracing::info!("tts player: late bind ok");
-                                            *player = Some(p);
-                                        }
-                                        Err(e) => tracing::warn!(
-                                            "tts player: late bind failed, silent reply: {e:#}"
-                                        ),
-                                    }
+                                if meaningful {
+                                    ensure_player(player);
                                 }
                                 if meaningful {
                                     if let Some(thinker) = thinker.as_deref_mut() {
@@ -663,6 +673,20 @@ fn publish_reply(bus: &EventBus, text: &str, latency_ms: u128) {
     );
     event.privacy_tier = PrivacyTier::Balanced;
     bus.publish(event);
+}
+
+/// 播放器 lazy 重建（耳机插拔/音频栈自愈后输出设备可用）：对话路径与
+/// 行为评论注入共用——player 缺失时重建一次，不重启应用
+fn ensure_player(player: &mut Option<super::player::Player>) {
+    if player.is_none() {
+        match super::player::Player::new() {
+            Ok(p) => {
+                tracing::info!("tts player: late bind ok");
+                *player = Some(p);
+            }
+            Err(e) => tracing::warn!("tts player: late bind failed, silent reply: {e:#}"),
+        }
+    }
 }
 
 /// 合成 + 播放一句回复（M1-3.5b）。合成阻塞 ~1–3s（与 ASR/LLM 同级，引擎线程

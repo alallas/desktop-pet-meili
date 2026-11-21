@@ -73,6 +73,57 @@ pub enum EventKind {
     SpeakEnded,
 }
 
+impl EventKind {
+    /// 规范事件名（snake_case），事件映射表 map.toml 的 `on` 字段取此封闭集合。
+    /// 新增变体必须在这里补名字——封闭集 + exhaustive match，编译器强制两端同步。
+    /// 当前消费方是 roundtrip 测试与文档锚点；事件监视器的名字显示将接入
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventKind::Booted => "booted",
+            EventKind::Ping => "ping",
+            EventKind::ForegroundSwitched => "foreground_switched",
+            EventKind::ForegroundMoved => "foreground_moved",
+            EventKind::SelfWindowMoved => "self_window_moved",
+            EventKind::IdleStateChanged => "idle_state_changed",
+            EventKind::MouseClicked => "mouse_clicked",
+            EventKind::PowerStateChanged => "power_state_changed",
+            EventKind::NetworkChanged => "network_changed",
+            EventKind::LockStateChanged => "lock_state_changed",
+            EventKind::MediaPlaybackChanged => "media_playback_changed",
+            EventKind::WakeWord => "wake_word",
+            EventKind::UtteranceEnded => "utterance_ended",
+            EventKind::TranscriptReady => "transcript_ready",
+            EventKind::ReplyReady => "reply_ready",
+            EventKind::SpeakEnded => "speak_ended",
+        }
+    }
+
+    /// as_str 的逆（map.toml 加载校验用）；全名集合外的输入返回 None
+    pub fn from_name(name: &str) -> Option<Self> {
+        use EventKind::*;
+        Some(match name {
+            "booted" => Booted,
+            "ping" => Ping,
+            "foreground_switched" => ForegroundSwitched,
+            "foreground_moved" => ForegroundMoved,
+            "self_window_moved" => SelfWindowMoved,
+            "idle_state_changed" => IdleStateChanged,
+            "mouse_clicked" => MouseClicked,
+            "power_state_changed" => PowerStateChanged,
+            "network_changed" => NetworkChanged,
+            "lock_state_changed" => LockStateChanged,
+            "media_playback_changed" => MediaPlaybackChanged,
+            "wake_word" => WakeWord,
+            "utterance_ended" => UtteranceEnded,
+            "transcript_ready" => TranscriptReady,
+            "reply_ready" => ReplyReady,
+            "speak_ended" => SpeakEnded,
+            _ => return None,
+        })
+    }
+}
+
 /// 标准化事件：Rust→WebView 事件总线的唯一格式
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct StdEvent {

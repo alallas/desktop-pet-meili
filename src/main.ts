@@ -493,3 +493,5 @@ void events.simPanel.listen((e) => {
   clickThrough = !simOpen;
   simLog(simOpen ? "面板已开（穿透关）" : "");
 });
+// 注册成功标记：排障时确认监听器真的挂上（模块中途抛异常会静默跳过这段）
+void commands.debugLog("[sim] simPanel listener registered").catch(() => {});

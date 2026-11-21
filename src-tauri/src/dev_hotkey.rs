@@ -10,8 +10,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::Manager;
-use tauri_specta::Event as _; // SimPanel::emit / NAME
+use tauri::{Emitter, Manager};
+use tauri_specta::Event as _; // SimPanel::NAME
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
 
@@ -42,7 +42,10 @@ pub fn start(app: tauri::AppHandle) {
             if let Some(win) = win {
                 let _ = win.set_ignore_cursor_events(!open);
             }
-            if let Err(e) = SimPanel(open).emit(&app) {
+            // 不用 tauri_specta 的 Event::emit（与 Booted 同款路径，实机验证这两种
+            // specta 事件都到不了前端，而 EventStream 的裸 Emitter::emit 正常——
+            // 故走与 EventStream 完全相同的裸发路径，事件名与载荷格式保持一致）
+            if let Err(e) = app.emit(SimPanel::NAME, open) {
                 tracing::warn!("sim panel event emit failed: {e}");
             }
             tracing::info!(open, "sim panel toggled via hotkey");

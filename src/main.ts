@@ -123,6 +123,25 @@ bubble.style.cssText =
   "transform:translate(-50%,-130%);white-space:nowrap;z-index:98;pointer-events:none";
 document.body.appendChild(bubble);
 
+// ---------- M1-6 前哨：说话气泡（她出声时的视觉反馈）----------
+// 行为评论与对话回复共用 ReplyReady 通道（Rust 侧行为评论复用该事件）；
+// SpeakEnded（播完/被打断）即收。已知限制：对话回复是流式边想边播，
+// ReplyReady 在整句生成完才发，气泡比开腔略晚（行为评论是整句台词无此问题）。
+const speechBubble = document.createElement("div");
+speechBubble.style.cssText =
+  "position:fixed;display:none;max-width:340px;padding:8px 14px;background:#fff;color:#111;" +
+  "border:2px solid #ff9e4a;border-radius:14px;font:15px/1.5 sans-serif;" +
+  "box-shadow:0 3px 12px rgba(0,0,0,.3);" +
+  "transform:translate(-50%,-130%);z-index:98;pointer-events:none;white-space:normal";
+document.body.appendChild(speechBubble);
+
+let speechText = "";
+let speechUntil = 0; // performance.now() 截止戳；SpeakEnded 或时长估完即收
+/// 台词念完时长估计：~0.28s/字 + 1.2s 收尾余量，封顶 15s（SpeakEnded 会提前收）
+function estimateSpeechMs(text: string) {
+  return Math.min(15000, 1200 + [...text].length * 280);
+}
+
 // 唤醒提示音：Web Audio 现场合成双音"叮"（零音频文件零授权问题；
 // 小爱/Siri 都有唤醒确认音，是"她听到了"的不可忽略信号——2026-11-19 用户反馈
 // "喊 10 次都不出来"实为反馈太弱：KWS 10/10 命中但跳一下+小气泡注意不到）
@@ -174,8 +193,17 @@ void events.eventStream.listen((e) => {
   const s = e.payload;
   if (s.kind === "WakeWord") {
     wakeCue();
+    speechUntil = 0; // 打断正在播的话：说话气泡立刻收
   } else if (s.kind === "TranscriptReady") {
     bubbleUntil = 0; // 收到话了，气泡使命完成
+  } else if (s.kind === "ReplyReady") {
+    const text = (s.payload as { text?: string }).text ?? "";
+    if (text) {
+      speechText = text;
+      speechUntil = performance.now() + estimateSpeechMs(text);
+    }
+  } else if (s.kind === "SpeakEnded") {
+    speechUntil = 0; // 播完或被唤醒打断（barge-in）
   }
 });
 
@@ -253,22 +281,36 @@ function tick() {
   petAnchor.position.y =
     petBasePos.y + (hopT >= 0 && hopT < 1 ? 4 * HOP_H * hopT * (1 - hopT) : 0);
 
-  // "我在听"气泡：宠物头顶上方，世界坐标投影到屏幕
-  const bubbleOn = performance.now() < bubbleUntil;
-  if (bubbleOn) {
-    _v3.set(petBasePos.x, petBasePos.y + PET_HEIGHT + 0.15, 0).project(camera);
-    bubble.style.display = "block";
-    bubble.style.left = `${(_v3.x * 0.5 + 0.5) * innerWidth}px`;
-    bubble.style.top = `${(-_v3.y * 0.5 + 0.5) * innerHeight}px`;
-    if (!bubbleShownLogged) {
-      bubbleShownLogged = true;
-      void commands
-        .debugLog(`[wakecue] bubble shown at ${bubble.style.left},${bubble.style.top}`)
-        .catch(() => {});
-    }
-  } else {
+  // 头顶气泡：说话气泡优先于"我在听"气泡，同一锚点投影
+  _v3.set(petBasePos.x, petBasePos.y + PET_HEIGHT + 0.15, 0).project(camera);
+  const headLeft = `${(_v3.x * 0.5 + 0.5) * innerWidth}px`;
+  const headTop = `${(-_v3.y * 0.5 + 0.5) * innerHeight}px`;
+  const speechOn = performance.now() < speechUntil;
+  if (speechOn) {
+    speechBubble.textContent = speechText;
+    speechBubble.style.display = "block";
+    speechBubble.style.left = headLeft;
+    speechBubble.style.top = headTop;
     bubble.style.display = "none";
     bubbleShownLogged = false;
+  } else {
+    speechBubble.style.display = "none";
+    // "我在听"气泡：宠物头顶上方，世界坐标投影到屏幕
+    const bubbleOn = performance.now() < bubbleUntil;
+    if (bubbleOn) {
+      bubble.style.display = "block";
+      bubble.style.left = headLeft;
+      bubble.style.top = headTop;
+      if (!bubbleShownLogged) {
+        bubbleShownLogged = true;
+        void commands
+          .debugLog(`[wakecue] bubble shown at ${bubble.style.left},${bubble.style.top}`)
+          .catch(() => {});
+      }
+    } else {
+      bubble.style.display = "none";
+      bubbleShownLogged = false;
+    }
   }
 
   renderer.render(scene, camera);

@@ -6,6 +6,7 @@ mod behavior;
 mod cloud;
 mod db;
 mod debounce;
+mod dev_hotkey;
 mod event_bus;
 mod event_collector;
 mod hooks;
@@ -32,7 +33,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::debug_emit_event,
             ipc::debug_reset_behavior,
         ])
-        .events(tauri_specta::collect_events![ipc::Booted, ipc::EventStream])
+        .events(tauri_specta::collect_events![
+            ipc::Booted,
+            ipc::EventStream,
+            ipc::SimPanel
+        ])
         .typ::<ipc::StdEvent>()
         .typ::<ipc::EventSource>()
         .typ::<ipc::EventKind>()
@@ -104,6 +109,8 @@ fn main() {
             let (comment_tx, comment_rx) = std::sync::mpsc::sync_channel::<String>(8);
             voice::engine::start(bus.clone(), comment_rx);
             behavior::start(bus.clone(), control_rx, comment_tx);
+            // M1-5 场景模拟器：全局热键 Ctrl+Alt+N（主窗口不聚焦，热键只能 Rust 侧注册）
+            dev_hotkey::start(app.handle().clone());
             // M1-1：事件通道样例——启动完成事件（ping-pong 的另一半在前端 listen）。
             // 延迟 1s 发射：setup 阶段 WebView 尚未加载，立即发会被错过（事件不排队）。
             builder.mount_events(app);

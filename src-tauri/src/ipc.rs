@@ -160,6 +160,11 @@ pub struct Booted(pub StdEvent);
 #[derive(Debug, Clone, Serialize, Type, tauri_specta::Event)]
 pub struct EventStream(pub StdEvent);
 
+/// 场景模拟器面板开关（Rust→WebView）：全局热键 Ctrl+Alt+N 触发
+/// （主窗口不聚焦，前端按键快捷键不可达，热键只能注册在 Rust 侧）
+#[derive(Debug, Clone, Serialize, Type, tauri_specta::Event)]
+pub struct SimPanel(pub bool);
+
 fn uuid() -> String {
     // M1-1：无 uuid 依赖前的临时 id（进程内唯一即可）；repo.rs 落地时换正式实现
     use std::sync::atomic::{AtomicU64, Ordering};

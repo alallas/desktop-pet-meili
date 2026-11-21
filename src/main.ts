@@ -290,7 +290,7 @@ async function refresh() {
   const info = [
     `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}`,
     `窗口 ${size.width}×${size.height} @(${pos.x},${pos.y})  穿透:${clickThrough}`,
-    `T穿透 M监视 N模拟 Q退出`,
+    `Ctrl+Alt+N 模拟器  |  T穿透 M监视 Q退出(需窗口聚焦)`,
   ];
   debug.textContent = info.join("\n");
   invoke("debug_log", { msg: info.join(" | ") }).catch(() => {});
@@ -397,9 +397,12 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- M1-5 场景模拟器 ----------
-// 按 N 开关：把合成事件以 System 源注入总线，走完整四道闸（测的就是真实链路；
+// 全局热键 Ctrl+Alt+N 呼出/关闭（Rust 侧 dev_hotkey 注册；主窗口 skipTaskbar +
+// 不聚焦 + 点击穿透，键盘焦点永远到不了 WebView，前端按键快捷键全部不可达）。
+// 面板开关的权威状态在 Rust，这里只按 SimPanel 事件同步显示。
+// 场景按钮把合成事件以 System 源注入总线，走完整四道闸（测的就是真实链路；
 // 不用 Test 源是因为行为引擎跳过它）。配"重置冷却"按钮，连续测试不用等 30min。
-// 面板要可点击——打开时自动关点击穿透，关闭时恢复。
+// 面板可点击 = 热键触发时 Rust 已关点击穿透。
 const SCENARIOS: { label: string; kind: string; payload: Value }[] = [
   { label: "启动", kind: "booted", payload: { version: "0.0.1" } },
   { label: "锁屏", kind: "lock_state_changed", payload: { locked: true } },
@@ -426,7 +429,7 @@ simPanel.style.cssText =
 document.body.appendChild(simPanel);
 
 const simTitle = document.createElement("div");
-simTitle.textContent = "场景模拟器 (N 关闭)";
+simTitle.textContent = "场景模拟器 (Ctrl+Alt+N 关闭)";
 simTitle.style.cssText = "font-weight:bold;margin-bottom:6px;color:#9fe8c0";
 simPanel.appendChild(simTitle);
 
@@ -482,15 +485,11 @@ resetBtn.onclick = () => {
 simPanel.appendChild(resetBtn);
 
 let simOpen = false;
-async function toggleSim() {
-  simOpen = !simOpen;
-  simPanel.style.display = simOpen ? "block" : "none";
-  // 面板可点击 = 必须关掉穿透；关闭面板恢复穿透（与 T 键共享 clickThrough 状态）
-  clickThrough = !simOpen;
-  await invoke("set_click_through", { through: clickThrough });
-  simLog(simOpen ? "面板已开（穿透关）" : "");
-}
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "n" || e.key === "N") void toggleSim();
+// 面板开关权威在 Rust（全局热键），前端按事件同步显示与穿透状态
+void events.simPanel.listen((e) => {
+  simOpen = e.payload;
+  simPanel.style.display = simOpen ? "block" : "none";
+  clickThrough = !simOpen;
+  simLog(simOpen ? "面板已开（穿透关）" : "");
 });

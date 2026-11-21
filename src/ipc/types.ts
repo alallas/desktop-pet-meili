@@ -31,6 +31,7 @@ export const commands = {
 export const events = {
 	booted: makeEvent<Booted, Booted>("booted"),
 	eventStream: makeEvent<EventStream, EventStream>("event-stream"),
+	simPanel: makeEvent<SimPanel, SimPanel>("sim-panel"),
 };
 
 /* Types */
@@ -87,6 +88,12 @@ export type EventStream = StdEvent;
 
 /**  隐私三档（产品 §6，档位语义见 settings） */
 export type PrivacyTier = "Minimal" | "Balanced" | "Companion";
+
+/**
+ *  场景模拟器面板开关（Rust→WebView）：全局热键 Ctrl+Alt+N 触发
+ *  （主窗口不聚焦，前端按键快捷键不可达，热键只能注册在 Rust 侧）
+ */
+export type SimPanel = boolean;
 
 /**  标准化事件：Rust→WebView 事件总线的唯一格式 */
 export type StdEvent = {

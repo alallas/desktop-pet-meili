@@ -2,23 +2,19 @@
 //! 本地云端同一人设规则（云端通道 M1-4 接入后复用本模块的 persona 装配）。
 //!
 //! 产品 §4.1 人设卡：meili，小水獭，潮间带收容所"老员工"引导员；
-//! 口癖"美丽认为"（2026-11-19 用户改定，第三人称自称垫词，不刷屏）；元气、话多、爱收藏石头；
-//! 温暖陪伴调性。M0 实测：Qwen3-4B 关思考（enable_thinking=false）+ 短回复
+//! 人设内容在 resources/creatures/meili.toml（PersonaSpec，persona.rs），
+//! 改口癖/性格只改 TOML 不编译；本模块负责人设装配、上下文与请求。
+//! M0 实测：Qwen3-4B 关思考（enable_thinking=false）+ 短回复
 //! prompt，persona 表现合格。
 
+pub mod persona;
 pub mod sidecar;
 
 use std::collections::VecDeque;
 use std::io::BufRead;
 
+use persona::PersonaSpec;
 use sidecar::Sidecar;
-
-/// 人设 system prompt（产品 §4.1；改口癖/性格只改这里）
-const SYSTEM_PROMPT: &str = "你是「美丽」（meili），「潮间带」海洋收容所里的一只小水獭，\
-收容所的引导员老员工。口癖是\"美丽认为\"——以第三人称自称的口头垫词，\
-句首自然带出，口癖后习惯带逗号停顿，每两三句里最多出现一次，不刻意刷屏。性格元气、好奇、话多、爱收藏，\
-口袋里总有几块最喜欢的石头。你在主人的电脑桌面上陪伴他、观察他的生活。\
-每次回复不超过两句话，语气温暖，像朋友而不是助理。";
 
 /// 短上下文轮数（每轮 = 用户一句 + 美丽一句）
 const HISTORY_TURNS: usize = 4;
@@ -26,13 +22,16 @@ const HISTORY_TURNS: usize = 4;
 /// 生成上限：M0 实测美美短回复 10–20 tokens；90 留足余量又不至于失控
 const MAX_TOKENS: u32 = 90;
 
-/// 思考层不可用时的话术兜底（保住"喊了有回应"的闭环）
-pub const FALLBACK_REPLY: &str = "美丽认为，我刚刚没太听清，你可以再说一遍吗？";
+/// 思考层不可用时的话术兜底（保住"喊了有回应"的闭环）。
+/// 引擎层没有 persona，兜底话术故意不带口癖——通用优先，避免口癖与档案脱节
+pub const FALLBACK_REPLY: &str = "我刚刚没太听清，你可以再说一遍吗？";
 
 /// 对话思考器：持有 sidecar 生命周期 + 短期记忆。
 pub struct Thinker {
     _sidecar: Sidecar,
     history: VecDeque<(String, String)>,
+    /// 人设档案（resources/creatures/<id>.toml；M2 多动物时按当前动物切换）
+    persona: PersonaSpec,
 }
 
 impl Thinker {
@@ -56,6 +55,7 @@ impl Thinker {
         Ok(Self {
             _sidecar: sidecar,
             history: VecDeque::new(),
+            persona: PersonaSpec::load("meili"),
         })
     }
 
@@ -68,7 +68,7 @@ impl Thinker {
         transcript: &str,
         mut on_sentence: impl FnMut(&str),
     ) -> Result<String, String> {
-        let messages = Self::assemble_messages(&self.history, transcript);
+        let messages = Self::assemble_messages(&self.persona, &self.history, transcript);
         let mut splitter = SentenceSplitter::new();
         let mut reply = String::new();
         self.chat_stream(&messages, |delta| {
@@ -92,10 +92,12 @@ impl Thinker {
     /// 人设装配：system + 历史轮次 + 本轮（本地云端同一规则，见模块文档）。
     /// 独立成纯函数便于无 sidecar 测试。
     fn assemble_messages(
+        persona: &PersonaSpec,
         history: &VecDeque<(String, String)>,
         transcript: &str,
     ) -> serde_json::Value {
-        let mut messages = vec![serde_json::json!({"role": "system", "content": SYSTEM_PROMPT})];
+        let mut messages =
+            vec![serde_json::json!({"role": "system", "content": persona.system_prompt()})];
         for (user, assistant) in history {
             messages.push(serde_json::json!({"role": "user", "content": user}));
             messages.push(serde_json::json!({"role": "assistant", "content": assistant}));
@@ -250,7 +252,8 @@ mod tests {
         let mut history = VecDeque::new();
         history.push_back(("你好".into(), "你好呀，我是美丽".into()));
         history.push_back(("在干嘛".into(), "翻石头".into()));
-        let msgs = Thinker::assemble_messages(&history, "今天天气怎么样");
+        let persona = PersonaSpec::load("meili");
+        let msgs = Thinker::assemble_messages(&persona, &history, "今天天气怎么样");
         let arr = msgs.as_array().expect("messages 必须是数组");
         // system + 2 轮 × 2 + 当前 user = 6
         assert_eq!(arr.len(), 6);
@@ -270,7 +273,8 @@ mod tests {
     /// 空历史：system + user 两条，无悬空 assistant
     #[test]
     fn assemble_messages_empty_history() {
-        let msgs = Thinker::assemble_messages(&VecDeque::new(), "喂");
+        let persona = PersonaSpec::load("meili");
+        let msgs = Thinker::assemble_messages(&persona, &VecDeque::new(), "喂");
         let arr = msgs.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[1]["role"], "user");

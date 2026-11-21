@@ -403,6 +403,7 @@ dependencies = [
  "tauri-build",
  "tauri-specta",
  "thiserror 1.0.69",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "ureq",

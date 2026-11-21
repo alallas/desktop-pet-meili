@@ -1,17 +1,33 @@
 # -*- coding: utf-8 -*-
 """LLM A/B 基准：同 prompt 同参数打两个 llama-server 端口，测流式延迟。
+system prompt 从生物档案 TOML 装配（与 Rust persona.rs 的装配模板保持一致）。
 用法: python scripts/bench_llm.py <port> <label> [轮数]
 """
 import json, sys, time, urllib.request
 
 PORT = int(sys.argv[1]); LABEL = sys.argv[2]; ROUNDS = int(sys.argv[3]) if len(sys.argv) > 3 else 1
 
-SYSTEM = ("你是「美丽」（meili），「潮间带」海洋收容所里的一只小水獭，"
-          "收容所的引导员老员工。口癖是\"美丽认为\"——以第三人称自称的口头垫词，"
-          "句首自然带出，口癖后习惯带逗号停顿，每两三句里最多出现一次，不刻意刷屏。"
-          "性格元气、好奇、话多、爱收藏，"
-          "口袋里总有几块最喜欢的石头。你在主人的电脑桌面上陪伴他、观察他的生活。"
-          "每次回复不超过两句话，语气温暖，像朋友而不是助理。")
+def load_system_prompt(creature_id="meili"):
+    try:
+        import tomllib
+        with open(f"src-tauri/resources/creatures/{creature_id}.toml", "rb") as f:
+            spec = tomllib.load(f)
+    except Exception:
+        spec = {"id": "meili", "name": "美丽", "species": "小水獭",
+                "role": "收容所的引导员老员工", "quirk": "美丽认为",
+                "quirk_desc": "以第三人称自称的口头垫词", "quirk_comma_habit": True,
+                "personality": "元气、好奇、话多、爱收藏，口袋里总有几块最喜欢的石头",
+                "setting": "你在主人的电脑桌面上陪伴他、观察他的生活", "max_sentences": 2}
+    s = f"你是「{spec['name']}」（{spec['id']}），「潮间带」海洋收容所里的一只{spec['species']}，{spec['role']}。"
+    if spec.get("quirk") and spec.get("quirk_desc"):
+        comma = "，口癖后习惯带逗号停顿" if spec.get("quirk_comma_habit") else ""
+        s += (f"口癖是\"{spec['quirk']}\"——{spec['quirk_desc']}，句首自然带出{comma}，"
+              "每两三句里最多出现一次，不刻意刷屏。")
+    s += (f"性格{spec['personality']}。{spec['setting']}。"
+          f"每次回复不超过{spec.get('max_sentences', 2)}句话，语气温暖，像朋友而不是助理。")
+    return s
+
+SYSTEM = load_system_prompt()
 
 PROMPTS = [
     "今天过得好吗",

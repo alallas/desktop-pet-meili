@@ -28,8 +28,9 @@ pub trait Collector: Send {
 }
 
 /// 启动全部采集器（装配层唯一入口）。新采集器在这里加一行。
-pub fn start_all(app: AppHandle) {
-    let bus = EventBus::new(app.clone());
+/// bus 必须由装配层注入并与语音/行为引擎同一实例——订阅者表随 clone 共享，
+/// 各自 `EventBus::new` 会让 Rust 侧订阅者永远收不到事件（M1-5 实机踩过）。
+pub fn start_all(app: AppHandle, bus: EventBus) {
     let collectors: Vec<Box<dyn Collector>> = vec![
         Box::new(win_event::WinEventCollector::new(app)),
         Box::new(idle::IdleCollector),

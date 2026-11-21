@@ -89,31 +89,29 @@ fn main() {
             // rusqlite::Connection 是 Send 但非 Sync，Mutex 包装后共享（IPC 多线程访问的正确姿势）
             app.manage(std::sync::Mutex::new(conn));
             // M1-2：系统层事件采集（前台窗口钩子 + 空闲轮询），统一投事件总线；
-            // 其余采集器（鼠标/SMTC/电源/网络/锁屏）后续按提交增量接入 start_all。
-            event_collector::start_all(app.handle().clone());
+            // M1-5 修正：总线单实例注入（与语音/行为引擎同一份），事件总线注释见 event_bus.rs
+            let bus = crate::event_bus::EventBus::new(app.handle().clone());
+            event_collector::start_all(app.handle().clone(), bus.clone());
             // M1-3.2 + M1-5：语音引擎（常驻线程）+ 行为引擎（事件 → 四道闸 → 台词）。
             // 台词通道：行为引擎产、语音引擎 IDLE 态消费（满员即丢，闸已限频）
             let (comment_tx, comment_rx) = std::sync::mpsc::sync_channel::<String>(8);
-            voice::engine::start(
-                crate::event_bus::EventBus::new(app.handle().clone()),
-                comment_rx,
-            );
-            behavior::start(
-                crate::event_bus::EventBus::new(app.handle().clone()),
-                comment_tx,
-            );
+            voice::engine::start(bus.clone(), comment_rx);
+            behavior::start(bus.clone(), comment_tx);
             // M1-1：事件通道样例——启动完成事件（ping-pong 的另一半在前端 listen）。
             // 延迟 1s 发射：setup 阶段 WebView 尚未加载，立即发会被错过（事件不排队）。
             builder.mount_events(app);
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                let _ = ipc::Booted(ipc::StdEvent::new(
+                let event = ipc::StdEvent::new(
                     ipc::EventSource::System,
                     ipc::EventKind::Booted,
                     serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
-                ))
-                .emit(&app_handle);
+                );
+                // M1-1 前端契约保留（Booted 事件）；同时投总线——Rust 侧订阅者
+                // （行为引擎）只认 publish 的扇出，直接 emit 它们永远收不到
+                let _ = ipc::Booted(event.clone()).emit(&app_handle);
+                bus.publish(event);
             });
             Ok(())
         })

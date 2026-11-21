@@ -162,30 +162,37 @@ impl GateEngine {
         self.cpu.tick();
     }
 
-    /// 事件入口：逐闸判定
+    /// 事件入口：逐闸判定。每道闸的判定留 info 级日志——场景模拟器测试期的
+    /// 排障刚需（"她为什么没说话"必须能从日志直接读到闸门结论）
     pub fn on_event(&mut self, event: &StdEvent, map: &BehaviorMap) -> GateDecision {
         let Some((idx, entry)) = map.find(event, |i| self.entry_cooldown_done(i)) else {
-            return GateDecision::Drop; // 无匹配/条目冷却中：正常沉默
+            // 无匹配 / 条目冷却中：正常沉默（两者同一出口，payload 条件不满足也走这里）
+            tracing::info!(kind = ?event.kind, "gate: drop (no match / entry cooldown)");
+            return GateDecision::Drop;
         };
         // 闸③内容门槛（P2 永远沉淀；沉默档全沉淀）
         if entry.priority >= self.tier.priority_floor() {
+            tracing::info!(kind = ?event.kind, priority = entry.priority, "gate③: priority floor drop");
             return GateDecision::Drop;
         }
         // 台词：变体轮换，取第一条槽位可填的
         let Some(text) = self.fill_any_variant(entry, &event.payload) else {
+            tracing::info!(kind = ?event.kind, "gate: drop (no fillable variant / missing slot)");
             return GateDecision::Drop;
         };
         // 闸④心情差：降级静默小动作（v1 静默；动作待 M1-6）
         if self.mood_bad() {
-            tracing::info!(priority = entry.priority, "gate④ mood bad, silent gesture");
+            tracing::info!(kind = ?event.kind, priority = entry.priority, "gate④ mood bad, silent gesture");
             return GateDecision::Drop;
         }
         // 闸①打字密集：非 P0 排队（P0 极重要放行）
         if entry.priority > 0 && (self.probes.typing_dense)() {
+            tracing::info!(kind = ?event.kind, "gate① typing dense → queue");
             return self.enqueue(text, entry.priority);
         }
         // 闸②全局冷却：排队
         if !self.global_cooldown_done() {
+            tracing::info!(kind = ?event.kind, "gate② global cooldown → queue");
             return self.enqueue(text, entry.priority);
         }
         self.mark_spoken(idx, entry);

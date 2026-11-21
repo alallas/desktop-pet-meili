@@ -13,4 +13,5 @@ export type {
   EventSource,
   PrivacyTier,
   StdEvent,
+  Value,
 } from "./types";

@@ -287,6 +287,17 @@ impl GateEngine {
             .is_some_and(|avg| avg >= CPU_HIGH_PERCENT);
         late && loaded
     }
+
+    /// 调试重置（场景模拟器配套）：回到"刚开口前"状态——清全局冷却、条目冷却
+    /// 与待讲队列；打字/CPU 滑窗是行为统计不是冷却，保留。
+    pub fn reset_cooldowns(&mut self) {
+        self.last_spoken = None;
+        self.entry_cooled_at
+            .iter_mut()
+            .for_each(|t| *t = Instant::now());
+        self.queue.clear();
+        tracing::info!("behavior gates reset (debug)");
+    }
 }
 
 /// 击键密度（闸①，真实探针）：10 分钟滑动窗计数 ≥ 阈值
@@ -451,5 +462,35 @@ say = ["换到{{app}}了", "{{title}}哦"]
                 Some("换到Code了")
             );
         }
+    }
+
+    #[test]
+    fn reset_cooldowns_allows_speaking_again() {
+        // 场景模拟器配套：开口后全局冷却未到 → 他事件排队；重置后应立即可说
+        let map = BehaviorMap::parse(
+            r#"[[map]]
+on = "booted"
+say = ["你好"]
+
+[[map]]
+on = "ping"
+say = ["在的"]
+"#,
+        );
+        let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
+        assert!(matches!(
+            g.on_event(&evt(EventKind::Booted), &map),
+            GateDecision::Speak(_)
+        ));
+        assert!(matches!(
+            g.on_event(&evt(EventKind::Ping), &map),
+            GateDecision::Queue
+        ));
+        g.reset_cooldowns();
+        assert!(matches!(
+            g.on_event(&evt(EventKind::Ping), &map),
+            GateDecision::Speak(t) if t == "在的"
+        ));
+        assert!(g.release_queue().is_none(), "重置应连待讲队列一起清掉");
     }
 }

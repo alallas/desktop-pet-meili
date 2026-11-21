@@ -11,7 +11,7 @@ pub mod map;
 
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::event_bus::EventBus;
 use crate::ipc::EventSource;
@@ -22,9 +22,21 @@ use map::BehaviorMap;
 
 /// CPU 采样/队列释放检查的节拍（对齐闸④ 5s 采样粒度）
 const TICK: Duration = Duration::from_secs(5);
+/// 控制消息的轮询粒度：远小于 TICK，让调试重置近乎即时生效
+const CONTROL_POLL: Duration = Duration::from_millis(200);
+
+/// 行为引擎调试控制（场景模拟器配套；Sender 侧经 tauri State 暴露给 IPC）
+pub enum Control {
+    /// 四道闸冷却清零（等价"回到刚启动"）
+    ResetCooldowns,
+}
 
 /// 启动行为引擎线程。comment_tx 送语音引擎（voice::engine::start 的入参）
-pub fn start(bus: EventBus, comment_tx: mpsc::SyncSender<String>) {
+pub fn start(
+    bus: EventBus,
+    control_rx: mpsc::Receiver<Control>,
+    comment_tx: mpsc::SyncSender<String>,
+) {
     thread::spawn(move || {
         let behavior_map = BehaviorMap::load("meili");
         let mut gates = GateEngine::new(
@@ -37,8 +49,15 @@ pub fn start(bus: EventBus, comment_tx: mpsc::SyncSender<String>) {
             entries = behavior_map.entries.len(),
             "behavior engine started"
         );
+        let mut last_tick = Instant::now();
         loop {
-            match rx.recv_timeout(TICK) {
+            // 控制消息优先处理（调试工具，延迟 ≤ CONTROL_POLL）
+            while let Ok(c) = control_rx.try_recv() {
+                match c {
+                    Control::ResetCooldowns => gates.reset_cooldowns(),
+                }
+            }
+            match rx.recv_timeout(CONTROL_POLL) {
                 Ok(event) => {
                     if matches!(event.source, EventSource::Voice | EventSource::Test) {
                         continue;
@@ -53,7 +72,11 @@ pub fn start(bus: EventBus, comment_tx: mpsc::SyncSender<String>) {
                     break;
                 }
             }
-            gates.tick();
+            // CPU 采样按 TICK 节拍推进（时间戳门控，控制轮询细化不影响粒度）
+            if last_tick.elapsed() >= TICK {
+                gates.tick();
+                last_tick = Instant::now();
+            }
             if let Some(text) = gates.release_queue() {
                 send_comment(&comment_tx, text);
             }

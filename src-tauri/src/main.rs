@@ -29,6 +29,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::set_click_through,
             ipc::get_cursor_position,
             ipc::debug_log,
+            ipc::debug_emit_event,
+            ipc::debug_reset_behavior,
         ])
         .events(tauri_specta::collect_events![ipc::Booted, ipc::EventStream])
         .typ::<ipc::StdEvent>()
@@ -92,11 +94,16 @@ fn main() {
             // M1-5 修正：总线单实例注入（与语音/行为引擎同一份），事件总线注释见 event_bus.rs
             let bus = crate::event_bus::EventBus::new(app.handle().clone());
             event_collector::start_all(app.handle().clone(), bus.clone());
+            // 总线与行为引擎控制通道挂 State：场景模拟器调试命令（debug_emit_event /
+            // debug_reset_behavior）经 tauri::State 取用
+            app.manage(bus.clone());
+            let (control_tx, control_rx) = std::sync::mpsc::sync_channel::<behavior::Control>(8);
+            app.manage(control_tx);
             // M1-3.2 + M1-5：语音引擎（常驻线程）+ 行为引擎（事件 → 四道闸 → 台词）。
             // 台词通道：行为引擎产、语音引擎 IDLE 态消费（满员即丢，闸已限频）
             let (comment_tx, comment_rx) = std::sync::mpsc::sync_channel::<String>(8);
             voice::engine::start(bus.clone(), comment_rx);
-            behavior::start(bus.clone(), comment_tx);
+            behavior::start(bus.clone(), control_rx, comment_tx);
             // M1-1：事件通道样例——启动完成事件（ping-pong 的另一半在前端 listen）。
             // 延迟 1s 发射：setup 阶段 WebView 尚未加载，立即发会被错过（事件不排队）。
             builder.mount_events(app);

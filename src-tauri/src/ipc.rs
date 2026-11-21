@@ -208,3 +208,31 @@ pub fn debug_log(msg: String) {
         let _ = writeln!(f, "{}", msg);
     }
 }
+
+/// 场景模拟器（M1-5 测试工具）：以 System 源把合成事件投进事件总线。
+/// 走完整四道闸——测的就是真实链路。source 不用 Test 是因为行为引擎跳过
+/// Test/Voice 源（防自激）。kind 必须是 `EventKind::from_name` 封闭集合内的
+/// 规范名，未知名报错不注入。
+#[tauri::command]
+#[specta::specta]
+pub fn debug_emit_event(
+    bus: tauri::State<'_, crate::event_bus::EventBus>,
+    kind: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let kind = EventKind::from_name(&kind).ok_or_else(|| format!("未知事件类型: {kind}"))?;
+    bus.publish(StdEvent::new(EventSource::System, kind, payload));
+    Ok(())
+}
+
+/// 场景模拟器配套：行为闸冷却清零（全局冷却 + 条目冷却 + 待讲队列），
+/// 连续测试不用等 30min 冷却或重启应用
+#[tauri::command]
+#[specta::specta]
+pub fn debug_reset_behavior(
+    control: tauri::State<'_, std::sync::mpsc::SyncSender<crate::behavior::Control>>,
+) -> Result<(), String> {
+    control
+        .try_send(crate::behavior::Control::ResetCooldowns)
+        .map_err(|e| format!("行为引擎控制通道异常: {e}"))
+}

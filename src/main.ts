@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { commands, events } from "./ipc/client";
+import { commands, events, type Value } from "./ipc/client";
 
 const debug = document.getElementById("debug")!;
 const win = getCurrentWindow();
@@ -290,7 +290,7 @@ async function refresh() {
   const info = [
     `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}`,
     `窗口 ${size.width}×${size.height} @(${pos.x},${pos.y})  穿透:${clickThrough}`,
-    `T穿透 M监视 Q退出`,
+    `T穿透 M监视 N模拟 Q退出`,
   ];
   debug.textContent = info.join("\n");
   invoke("debug_log", { msg: info.join(" | ") }).catch(() => {});
@@ -394,4 +394,103 @@ document.addEventListener("keydown", (e) => {
     monitor.style.display = monitor.style.display === "none" ? "block" : "none";
     if (monitor.style.display === "block") renderMonitor();
   }
+});
+
+// ---------- M1-5 场景模拟器 ----------
+// 按 N 开关：把合成事件以 System 源注入总线，走完整四道闸（测的就是真实链路；
+// 不用 Test 源是因为行为引擎跳过它）。配"重置冷却"按钮，连续测试不用等 30min。
+// 面板要可点击——打开时自动关点击穿透，关闭时恢复。
+const SCENARIOS: { label: string; kind: string; payload: Value }[] = [
+  { label: "启动", kind: "booted", payload: { version: "0.0.1" } },
+  { label: "锁屏", kind: "lock_state_changed", payload: { locked: true } },
+  { label: "解锁", kind: "lock_state_changed", payload: { locked: false } },
+  { label: "切到 VS Code", kind: "foreground_switched", payload: { app: "Code", title: "meili.map.toml" } },
+  { label: "切到浏览器", kind: "foreground_switched", payload: { app: "chrome", title: "GitHub - 潮间带" } },
+  { label: "切到游戏", kind: "foreground_switched", payload: { app: "somegame", title: "Some Game" } },
+  { label: "进入空闲", kind: "idle_state_changed", payload: { idle_seconds: 300, is_idle: true } },
+  { label: "结束空闲", kind: "idle_state_changed", payload: { idle_seconds: 0, is_idle: false } },
+  { label: "开始放歌", kind: "media_playback_changed", payload: { app: "cloudmusic", title: "晴天", artist: "周杰伦", state: "playing" } },
+  { label: "暂停音乐", kind: "media_playback_changed", payload: { state: "paused" } },
+  { label: "插上电源", kind: "power_state_changed", payload: { ac_online: true, charging: true, battery_percent: 42 } },
+  { label: "拔掉电源", kind: "power_state_changed", payload: { ac_online: false, charging: false, battery_percent: 41 } },
+  { label: "断网", kind: "network_changed", payload: { connected: false } },
+  { label: "网络恢复", kind: "network_changed", payload: { connected: true } },
+  { label: "鼠标点击", kind: "mouse_clicked", payload: { button: "left", x: 960, y: 540 } },
+];
+
+const simPanel = document.createElement("div");
+simPanel.style.cssText =
+  "position:fixed;right:8px;top:8px;width:210px;display:none;padding:8px;" +
+  "background:rgba(20,24,32,.85);border:1px solid #4a9eff;border-radius:8px;z-index:100;" +
+  "font:12px/1.5 sans-serif;color:#dde";
+document.body.appendChild(simPanel);
+
+const simTitle = document.createElement("div");
+simTitle.textContent = "场景模拟器 (N 关闭)";
+simTitle.style.cssText = "font-weight:bold;margin-bottom:6px;color:#9fe8c0";
+simPanel.appendChild(simTitle);
+
+const simStatus = document.createElement("div");
+simStatus.style.cssText = "margin-top:6px;color:#ffb;min-height:1.5em;white-space:pre-wrap";
+simPanel.appendChild(simStatus);
+
+function simLog(msg: string) {
+  simStatus.textContent = msg;
+  void commands.debugLog(`[sim] ${msg}`).catch(() => {});
+}
+
+for (const s of SCENARIOS) {
+  const btn = document.createElement("button");
+  btn.textContent = s.label;
+  btn.style.cssText =
+    "display:block;width:100%;margin:3px 0;padding:5px 8px;text-align:left;" +
+    "background:#2a3a4d;color:#dde;border:1px solid #456;border-radius:5px;cursor:pointer";
+  btn.onmouseenter = () => (btn.style.background = "#3a4f68");
+  btn.onmouseleave = () => (btn.style.background = "#2a3a4d");
+  btn.onclick = () => {
+    // 先重置冷却再注入：让这句立刻走闸①③④判定（冷却清零会把队列也清掉，
+    // 顺序反了刚注入的台词会被抹掉）
+    void commands
+      .debugResetBehavior()
+      .then((r) => {
+        if (r.status === "error") {
+          simLog(`重置冷却失败: ${r.error}`);
+          return undefined;
+        }
+        return commands.debugEmitEvent(s.kind, s.payload);
+      })
+      .then((r) => {
+        if (!r) return;
+        simLog(r.status === "ok" ? `已注入 ${s.kind}` : `注入失败: ${r.error}`);
+      })
+      .catch((err) => simLog(`异常: ${String(err)}`));
+  };
+  simPanel.appendChild(btn);
+}
+
+const resetBtn = document.createElement("button");
+resetBtn.textContent = "↺ 重置行为冷却";
+resetBtn.style.cssText =
+  "display:block;width:100%;margin:6px 0 0;padding:5px 8px;font-weight:bold;" +
+  "background:#4d3a2a;color:#ffd;border:1px solid #654;border-radius:5px;cursor:pointer";
+resetBtn.onclick = () => {
+  void commands
+    .debugResetBehavior()
+    .then((r) => simLog(r.status === "ok" ? "冷却已重置（全局/条目/队列）" : `重置失败: ${r.error}`))
+    .catch((err) => simLog(`异常: ${String(err)}`));
+};
+simPanel.appendChild(resetBtn);
+
+let simOpen = false;
+async function toggleSim() {
+  simOpen = !simOpen;
+  simPanel.style.display = simOpen ? "block" : "none";
+  // 面板可点击 = 必须关掉穿透；关闭面板恢复穿透（与 T 键共享 clickThrough 状态）
+  clickThrough = !simOpen;
+  await invoke("set_click_through", { through: clickThrough });
+  simLog(simOpen ? "面板已开（穿透关）" : "");
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "n" || e.key === "N") void toggleSim();
 });

@@ -13,6 +13,18 @@ export const commands = {
 	getCursorPosition: () => __TAURI_INVOKE<[number | null, number | null] | null>("get_cursor_position"),
 	/**  临时调试：前端状态写文件（截图不可靠时排查用，日志落 `%TEMP%\chaojiandai-debug.log`） */
 	debugLog: (msg: string) => __TAURI_INVOKE<void>("debug_log", { msg }),
+	/**
+	 *  场景模拟器（M1-5 测试工具）：以 System 源把合成事件投进事件总线。
+	 *  走完整四道闸——测的就是真实链路。source 不用 Test 是因为行为引擎跳过
+	 *  Test/Voice 源（防自激）。kind 必须是 `EventKind::from_name` 封闭集合内的
+	 *  规范名，未知名报错不注入。
+	 */
+	debugEmitEvent: (kind: string, payload: Value) => typedError<null, string>(__TAURI_INVOKE("debug_emit_event", { kind, payload })),
+	/**
+	 *  场景模拟器配套：行为闸冷却清零（全局冷却 + 条目冷却 + 待讲队列），
+	 *  连续测试不用等 30min 冷却或重启应用
+	 */
+	debugResetBehavior: () => typedError<null, string>(__TAURI_INVOKE("debug_reset_behavior")),
 };
 
 /** Events */
@@ -90,6 +102,15 @@ export type StdEvent = {
 export type Value = null | boolean | number | string | Value[] | { [key in string]: Value };
 
 /* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
+
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
 
 type EventEmitTo<T> = [T] extends [null] ? (target: __TAURI_EVENT.EventTarget | string) => Promise<void> : (target: __TAURI_EVENT.EventTarget | string, payload: T) => Promise<void>;

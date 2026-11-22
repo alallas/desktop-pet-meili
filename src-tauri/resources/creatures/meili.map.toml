@@ -42,6 +42,19 @@ when = { is_idle = [true] }
 priority = 1
 say = ["不动了……是在想事情吗？", "你不动，美丽也开始犯困了。"]
 
+[[map]]
+on = "idle_state_changed"
+when = { is_idle = [false] }
+priority = 1
+say = ["动啦？欢迎回到潮间带。", "回来啦回来啦，石头还没数完呢。"]
+
+[[map]]
+on = "media_playback_changed"
+when = { state = ["paused"] }
+priority = 1
+cooldown_min = 8
+say = ["歌停啦？刚才那首还不错。", "暂停了诶，美丽还晃着尾巴打拍子呢。"]
+
 # ---------- 媒体陪看陪听 ----------
 [[map]]
 on = "media_playback_changed"
@@ -74,3 +87,10 @@ on = "network_changed"
 when = { connected = [true] }
 priority = 1
 say = ["网回来了，海浪又通了。", "连上啦连上啦。"]
+
+# ---------- 鼠标（高频事件：冷却拉长防吵） ----------
+[[map]]
+on = "mouse_clicked"
+priority = 1
+cooldown_min = 30
+say = ["你点得好快，手指不累吗？", "哒哒哒，鼠标声把美丽吵醒了。", "点吧点吧，我盯着呢。"]

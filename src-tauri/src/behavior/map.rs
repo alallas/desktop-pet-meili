@@ -239,6 +239,82 @@ say = ["x"]
         );
     }
 
+    /// 场景模拟器全覆盖回归（2026-11-22 用户实机投诉"暂停音乐没回复"：
+    /// 模拟器按钮 payload 在 map.toml 无匹配条目被闸丢）。这里把 main.ts
+    /// SCENARIOS 列表逐条镜像进测试——任何"按钮点了没反应"从此是测试失败。
+    #[test]
+    fn simulator_scenarios_all_covered_by_map() {
+        // 与 src/main.ts SCENARIOS 保持一致（改前端按钮时同步改这里）
+        let scenarios: Vec<(&str, serde_json::Value)> = vec![
+            ("booted", serde_json::json!({"version": "0.0.1"})),
+            ("lock_state_changed", serde_json::json!({"locked": true})),
+            ("lock_state_changed", serde_json::json!({"locked": false})),
+            (
+                "foreground_switched",
+                serde_json::json!({"app": "Code", "title": "meili.map.toml"}),
+            ),
+            (
+                "foreground_switched",
+                serde_json::json!({"app": "chrome", "title": "GitHub - 潮间带"}),
+            ),
+            (
+                "foreground_switched",
+                serde_json::json!({"app": "somegame", "title": "Some Game"}),
+            ),
+            (
+                "idle_state_changed",
+                serde_json::json!({"idle_seconds": 300, "is_idle": true}),
+            ),
+            (
+                "idle_state_changed",
+                serde_json::json!({"idle_seconds": 0, "is_idle": false}),
+            ),
+            (
+                "media_playback_changed",
+                serde_json::json!({"app": "cloudmusic", "title": "晴天", "artist": "周杰伦", "state": "playing"}),
+            ),
+            (
+                "media_playback_changed",
+                serde_json::json!({"state": "paused"}),
+            ),
+            (
+                "power_state_changed",
+                serde_json::json!({"ac_online": true, "charging": true, "battery_percent": 42}),
+            ),
+            (
+                "power_state_changed",
+                serde_json::json!({"ac_online": false, "charging": false, "battery_percent": 41}),
+            ),
+            ("network_changed", serde_json::json!({"connected": false})),
+            ("network_changed", serde_json::json!({"connected": true})),
+            (
+                "mouse_clicked",
+                serde_json::json!({"button": "left", "x": 960, "y": 540}),
+            ),
+        ];
+        let m = BehaviorMap::load("meili");
+        for (name, payload) in scenarios {
+            let kind = EventKind::from_name(name).expect("场景事件名必须封闭");
+            let e = evt(kind, payload.clone());
+            let found = m
+                .entries
+                .iter()
+                .filter(|(k, entry)| *k == e.kind && when_matches(&entry.when, &e.payload))
+                .collect::<Vec<_>>();
+            assert!(
+                !found.is_empty(),
+                "场景 {name} {payload} 无匹配映射条目（点了没反应）"
+            );
+            let fillable = found.iter().any(|(_, entry)| {
+                entry
+                    .say
+                    .iter()
+                    .any(|v| fill_template(v, &payload).is_some())
+            });
+            assert!(fillable, "场景 {name} {payload} 的匹配条目无可填台词变体");
+        }
+    }
+
     #[test]
     fn event_kind_name_roundtrip() {
         for (name, kind) in [

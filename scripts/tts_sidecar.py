@@ -86,10 +86,18 @@ def main():
             continue
         # 防御：协议单行，清掉所有控制字符（合成器对换行敏感）
         line = "".join(ch for ch in line if ch >= " " or ch in "\t")
-        text = line.replace("\t", "，")
-        if not text:
+        # 协议：行首是 seq，\t 后为合成文本——必须拆开，seq 绝不能进合成文本
+        # （#35 回归教训：曾把 \t 替换成逗号，导致每句被念出序号"8，美丽认为"）
+        seq_str, sep, text = line.partition("\t")
+        text = text.replace("\t", "，")  # 文本内部的制表符降级为逗号
+        if not sep or not text.strip():
+            print(f"ERR\t{seq}\t协议错误：缺少 seq 或文本", flush=True)
             continue
-        seq += 1
+        try:
+            seq = int(seq_str)
+        except ValueError:
+            print(f"ERR\t{seq}\t协议错误：seq 非数字 {seq_str!r}", flush=True)
+            continue
         path = OUT_DIR / f"tts_{int(time.time())}_{seq}.wav"
         try:
             cached = CACHE.get(text)

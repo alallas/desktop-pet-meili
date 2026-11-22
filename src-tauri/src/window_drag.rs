@@ -14,9 +14,10 @@
 //! 已知折衷（v1）：
 //! - 命中矩形 = 宠物模型的绑定姿势投影 bbox（前端 500ms 重算上报，带 6px 容差），
 //!   不是逐像素 alpha 检测；蒙皮动画瞬时姿态超出绑定位的误差容差内吸收；
-//! - 松手一律恢复穿透 ON——模拟器面板开着时穿透本来也是关的，那时不会拖
-//!   宠物（用户在点面板），冲突场景可忽略；若未来出现"面板开着拖宠物"，
-//!   需要穿透状态权威化（记待办）；
+//! - 穿透状态权威化已落地（#41①，2026-11-22）：[`THROUGH_DESIRED`] 是唯一权威
+//!   （前端 set_click_through / 模拟器热键都经 [`set_through_desired`] 写入），
+//!   拖拽的"摘除/恢复"只是围绕权威的瞬时物理动作，松手恢复权威值——
+//!   "面板开着拖宠物 → 松手面板失效"冲突在此根治；
 //! - 点击宠物（按下即松、无位移）≠ 拖动：松手时由拖线程裁决——没拖动就
 //!   发 deferred 点击事件（on_pet=true），mouse.rs 对落在宠物上的左键按下
 //!   是 deferred 的（不发全局点击），"拖一下误触发点击评论"在此根治。
@@ -55,6 +56,11 @@ static HIT_RECT: [AtomicI32; 4] = [
 static HIT_READY: AtomicBool = AtomicBool::new(false);
 /// 事件总线（松手裁决"点击 vs 拖拽"后发 deferred 点击用；start 时注入）
 static BUS: OnceLock<crate::event_bus::EventBus> = OnceLock::new();
+/// 穿透期望状态的**唯一权威**（#41① 穿透状态权威化，2026-11-22）：前端
+/// set_click_through 与模拟器面板热键都经 [`set_through_desired`] 改写这里；
+/// 拖拽的"摘除/恢复"只是围绕权威状态的瞬时物理动作——松手恢复的是
+/// 权威值而非硬编码 ON（修"面板开着拖宠物 → 松手面板失效"冲突）
+static THROUGH_DESIRED: AtomicBool = AtomicBool::new(true);
 
 /// SWP_* 常量（winuser.h 稳定值；同 win_event.rs 的本地定义约定，避免 import 漂移）
 const SWP_NOSIZE: u32 = 0x0001;
@@ -117,6 +123,26 @@ pub fn on_left_button_down(x: i32, y: i32) {
     }
     if let Some(tx) = DOWN_TX.get() {
         let _ = tx.try_send((x, y)); // 满则丢：拖线程正忙，无法并发拖第二轮
+    }
+}
+
+/// 设置穿透期望状态（穿透权威唯一入口，ipc set_click_through 与模拟器面板热键
+/// 共用）：写入权威位并立即应用到窗口。应用走 Get/SetWindowLongPtrW 而非
+/// tauri 的 set_ignore_cursor_events——两者同改 WS_EX_TRANSPARENT 位，
+/// 但本模块拖线程也直接操作该位，经同一对 API 读写避免状态互相覆盖
+pub fn set_through_desired(through: bool) {
+    THROUGH_DESIRED.store(through, Ordering::SeqCst);
+    let Some(&hwnd_isize) = SELF_HWND.get() else {
+        return; // 装配期（start 之前）调用：权威位已写，start 后自然生效
+    };
+    unsafe {
+        let hwnd = hwnd_isize as HWND;
+        let style = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, -20);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            hwnd,
+            -20,
+            if through { style | 0x20 } else { style & !0x20 },
+        );
     }
 }
 
@@ -225,14 +251,20 @@ fn drag_once(hwnd: HWND, x: i32, y: i32) {
         }
     }
 
-    // 恢复穿透 ON（小窗常态）：WS_EX_TRANSPARENT 位加回（见 on_left_button_down
-    // 的对称注释）。移动会触发自窗口 LOCATIONCHANGE → 现有 SelfWindowMoved
-    // 事件链路，位置同步不用本模块操心
+    // 恢复穿透：恢复的是权威期望状态（THROUGH_DESIRED）而非硬编码 ON——
+    // "模拟器面板开着（权威=OFF）时拖宠物"松手后面板才不会失效（#41①）。
+    // 移动会触发自窗口 LOCATIONCHANGE → 现有 SelfWindowMoved 事件链路，
+    // 位置同步不用本模块操心
+    let through = THROUGH_DESIRED.load(Ordering::SeqCst);
     unsafe {
         let style = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, -20);
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, -20, style | 0x20);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            hwnd,
+            -20,
+            if through { style | 0x20 } else { style & !0x20 },
+        );
     }
-    tracing::info!(moved, "pet drag ended");
+    tracing::info!(moved, through, "pet drag ended");
 
     // 松手裁决：没拖动 = 点宠物（摸头）。按下时mouse.rs 对"落在宠物上的
     // 左键"是 deferred 的（不发全局点击），由这里补发——拖到一半松手

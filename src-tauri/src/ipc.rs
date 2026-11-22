@@ -194,11 +194,12 @@ pub fn ping(msg: String) -> String {
     format!("pong: {msg}")
 }
 
-/// 点击穿透开关（M0 验证命令，产品化后由窗口管理器接管）
+/// 点击穿透开关：权威实现在 window_drag（THROUGH_DESIRED 原子位）——
+/// 拖拽摘除/恢复穿透围绕同一权威状态，避免两处状态互覆（#41①）
 #[tauri::command]
 #[specta::specta]
-pub fn set_click_through(through: bool, window: tauri::Window) {
-    let _ = window.set_ignore_cursor_events(through);
+pub fn set_click_through(through: bool) {
+    crate::window_drag::set_through_desired(through);
 }
 
 /// 宠物命中矩形上报（窗口拖拽 hit test 用）：只有点在宠物身上才"拎起"，

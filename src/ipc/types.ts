@@ -7,7 +7,10 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 export const commands = {
 	/**  ping-pong 样例：IPC 两端联通性验证（M1-1 交付项） */
 	ping: (msg: string) => __TAURI_INVOKE<string>("ping", { msg }),
-	/**  点击穿透开关（M0 验证命令，产品化后由窗口管理器接管） */
+	/**
+	 *  点击穿透开关：权威实现在 window_drag（THROUGH_DESIRED 原子位）——
+	 *  拖拽摘除/恢复穿透围绕同一权威状态，避免两处状态互覆（#41①）
+	 */
 	setClickThrough: (through: boolean) => __TAURI_INVOKE<void>("set_click_through", { through }),
 	/**
 	 *  宠物命中矩形上报（窗口拖拽 hit test 用）：只有点在宠物身上才"拎起"，

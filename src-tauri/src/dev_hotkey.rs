@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tauri_specta::Event as _; // SimPanel::NAME
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
@@ -38,10 +38,9 @@ pub fn start(app: tauri::AppHandle) {
                 continue;
             }
             let open = !PANEL_OPEN.fetch_xor(true, Ordering::SeqCst);
-            let win = app.get_webview_window("main");
-            if let Some(win) = win {
-                let _ = win.set_ignore_cursor_events(!open);
-            }
+            // 穿透改经 window_drag 权威入口（#41①）：与拖拽的摘除/恢复
+            // 共用 THROUGH_DESIRED，面板开着拖宠物松手后面板不失效
+            crate::window_drag::set_through_desired(!open);
             // 不用 tauri_specta 的 Event::emit（与 Booted 同款路径，实机验证这两种
             // specta 事件都到不了前端，而 EventStream 的裸 Emitter::emit 正常——
             // 故走与 EventStream 完全相同的裸发路径，事件名与载荷格式保持一致）

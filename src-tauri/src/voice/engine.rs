@@ -50,6 +50,47 @@ const SHORT_NUDGE: &str = "嗯？我没太听清，再说一遍？";
 /// （安静噪声同样过不了 VAD 确认，职责重复），窗口放宽 3s 覆盖 KWS 检测延迟。
 const SPEECH_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 
+/// 选"喂 KWS 最省"的采集配置（#37 优化项 c）：
+/// - 首选 16k 单声道（WASAPI 共享模式下系统音频引擎代做重采样，成本出本进程）；
+/// - 否则取 声道×采样率（数据量）最小的支持配置——采集回调里的声道折叠/
+///   重采样成本与数据量成正比（重采样器是通用任意率对，任何配置都能工作）。
+///
+/// supported_input_configs 查询失败（个别驱动不支持枚举）回退默认配置。
+fn pick_input_config(
+    device: &cpal::Device,
+) -> Result<cpal::SupportedStreamConfig, Box<dyn std::error::Error + Send + Sync>> {
+    if let Ok(configs) = device.supported_input_configs() {
+        let all: Vec<_> = configs.collect();
+        // 数据量同档时 F32 > I16 > U8（U8 量化噪声伤 KWS，排最后）
+        let fmt_rank = |f: cpal::SampleFormat| match f {
+            cpal::SampleFormat::F32 => 0u8,
+            cpal::SampleFormat::I16 => 1,
+            _ => 2,
+        };
+        let best = all
+            .into_iter()
+            .map(|c| {
+                let rate = if (c.min_sample_rate().0..=c.max_sample_rate().0).contains(&16000) {
+                    cpal::SampleRate(16000)
+                } else if c.max_sample_rate().0 < 16000 {
+                    c.max_sample_rate()
+                } else {
+                    c.min_sample_rate()
+                };
+                (
+                    c.channels() as u64 * rate.0 as u64,
+                    fmt_rank(c.sample_format()),
+                    c.with_sample_rate(rate),
+                )
+            })
+            .min_by_key(|(cost, rank, _)| (*cost, *rank));
+        if let Some((_, _, cfg)) = best {
+            return Ok(cfg);
+        }
+    }
+    Ok(device.default_input_config()?)
+}
+
 /// 块 RMS（16k 单声道 f32）
 fn chunk_rms(chunk: &[f32]) -> f32 {
     let sq: f64 = chunk.iter().map(|v| (*v as f64) * (*v as f64)).sum();
@@ -78,6 +119,10 @@ fn run(
     behavior_ctrl: SyncSender<crate::behavior::Control>,
     prewarm_lines: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!(
+        tid = crate::event_collector::tid(),
+        "voice engine thread up"
+    );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model_dir = root.join("../models/kws");
     let dir = model_dir.to_str().ok_or("模型路径非 UTF-8")?;
@@ -96,7 +141,7 @@ fn run(
     let device = host
         .default_input_device()
         .ok_or("无默认输入设备（麦克风）")?;
-    let config = device.default_input_config()?;
+    let config = pick_input_config(&device)?;
     tracing::info!(
         device = %device.name().unwrap_or_default(),
         rate = config.sample_rate().0,
@@ -226,9 +271,16 @@ where
     f32: cpal::FromSample<T>, // from_sample 的转换目标约束
 {
     let mut resampler = Resampler::new(in_rate, 16000.0);
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     device.build_input_stream(
         config,
         move |data: &[T], _| {
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    tid = crate::event_collector::tid(),
+                    "voice capture callback thread up"
+                );
+            }
             // 多声道取平均单声道化（KWS 只吃 mono）
             let mono: Vec<f32> = if channels == 1 {
                 data.iter().map(|s| f32::from_sample(*s)).collect()

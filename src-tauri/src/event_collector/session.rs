@@ -35,6 +35,7 @@ impl Collector for SessionCollector {
     fn start(&self, bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = BUS.get_or_init(|| bus);
         std::thread::spawn(move || unsafe {
+            tracing::info!(tid = super::tid(), "collector thread up: session");
             let class = class_name();
             let wc = WNDCLASSW {
                 style: 0,

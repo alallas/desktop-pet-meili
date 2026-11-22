@@ -23,6 +23,7 @@ pub struct IdleCollector;
 impl Collector for IdleCollector {
     fn start(&self, bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::thread::spawn(move || {
+            tracing::info!(tid = super::tid(), "collector thread up: idle");
             let mut hysteresis = Hysteresis::new(IDLE_LOW_SECS, IDLE_HIGH_SECS);
             loop {
                 let idle_secs = last_input_idle_secs();

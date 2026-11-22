@@ -52,6 +52,7 @@ impl Collector for KeyboardCollector {
         _bus: crate::event_bus::EventBus,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::thread::spawn(move || unsafe {
+            tracing::info!(tid = super::tid(), "collector thread up: keyboard");
             let hook: HHOOK =
                 SetWindowsHookExW(WH_KEYBOARD_LL, Some(callback), std::ptr::null_mut(), 0);
             if hook.is_null() {

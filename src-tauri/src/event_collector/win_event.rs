@@ -57,6 +57,7 @@ impl super::Collector for WinEventCollector {
             self_hwnd: AtomicIsize::new(self.self_hwnd),
         });
         std::thread::spawn(move || unsafe {
+            tracing::info!(tid = super::tid(), "collector thread up: win_event");
             let hooks = [
                 SetWinEventHook(
                     EVENT_SYSTEM_FOREGROUND,

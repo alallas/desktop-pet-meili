@@ -65,6 +65,7 @@ impl Collector for MediaCollector {
     fn start(&self, bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = BUS.get_or_init(|| bus);
         std::thread::spawn(move || {
+            tracing::info!(tid = super::tid(), "collector thread up: media");
             if let Err(e) = run() {
                 // 无 SMTC 服务的精简系统会走到这；记 error 退出（不影响其他采集器）
                 tracing::error!("SMTC collector exited: {e}");

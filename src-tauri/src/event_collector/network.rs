@@ -25,6 +25,7 @@ pub struct NetworkCollector;
 impl Collector for NetworkCollector {
     fn start(&self, bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::thread::spawn(move || {
+            tracing::info!(tid = super::tid(), "collector thread up: network");
             // 启动先报基线（没网启动 vs 有网启动对行为引擎意义不同）
             let mut prev: Option<bool> = None;
             publish_if_changed(&bus, &mut prev);

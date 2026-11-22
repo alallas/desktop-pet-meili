@@ -40,6 +40,10 @@ pub fn start(
     comment_tx: mpsc::SyncSender<String>,
 ) {
     thread::spawn(move || {
+        tracing::info!(
+            tid = crate::event_collector::tid(),
+            "behavior engine thread up"
+        );
         let behavior_map = BehaviorMap::load("meili");
         let mut gates = GateEngine::new(
             behavior_map.entries.len(),

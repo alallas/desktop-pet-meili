@@ -38,6 +38,7 @@ impl Collector for MouseCollector {
     fn start(&self, bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = BUS.get_or_init(|| bus);
         std::thread::spawn(move || unsafe {
+            tracing::info!(tid = super::tid(), "collector thread up: mouse");
             let hook: HHOOK =
                 SetWindowsHookExW(WH_MOUSE_LL, Some(callback), std::ptr::null_mut(), 0);
             if hook.is_null() {

@@ -10,6 +10,13 @@ use tauri::AppHandle;
 
 use crate::event_bus::EventBus;
 
+/// 当前线程 OS TID（#37 线程归因用：配合 scripts/profile-threads.ps1 的
+/// CPU 热点 Tid 定位到代码位置）。仅 spawn 点打一次日志，零常驻开销。
+pub(crate) fn tid() -> u32 {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    unsafe { GetCurrentThreadId() }
+}
+
 pub mod idle;
 pub mod keyboard;
 pub mod media;

@@ -21,6 +21,7 @@ pub struct PowerCollector;
 impl Collector for PowerCollector {
     fn start(&self, bus: EventBus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::thread::spawn(move || {
+            tracing::info!(tid = super::tid(), "collector thread up: power");
             let mut prev: Option<(bool, bool, u8)> = None;
             loop {
                 let cur = power_snapshot();

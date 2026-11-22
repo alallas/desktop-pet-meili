@@ -37,6 +37,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_Ndis",     # IpHelper 函数按项门控（GetAdaptersAddresses 需要）
     "Win32_Networking_WinSock",         # 同上（NDIS 结构引用的类型）
     "Win32_System_IO",                  # NotifyAddrChange 按项门控
+    "Win32_Graphics_Gdi",               # ClientToScreen（拖拽命中矩形的客户区原点）
     # 注：曾加 Win32_UI_HiDpi 取工作区，ForDpi 对 SPI_GETWORKAREA 实测返回失败，
     # 改用 SystemParametersInfoW（感知进程物理像素），feature 已移除
 ] }

@@ -29,6 +29,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .commands(tauri_specta::collect_commands![
             ipc::ping,
             ipc::set_click_through,
+            ipc::set_pet_hit_rect,
             ipc::get_cursor_position,
             ipc::debug_log,
             ipc::debug_emit_event,

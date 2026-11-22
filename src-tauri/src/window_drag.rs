@@ -12,14 +12,15 @@
 //! 是本模块的业务判断——由 [`on_left_button_down`] 承担。
 //!
 //! 已知折衷（v1）：
-//! - 整窗可拖（300×460 内任意点），"只按宠物不透明像素才拖"的 hit rect 细化
-//!   记 §11 待办（前端上报 bbox 投影，按物种调整）；
+//! - 命中矩形 = 宠物模型的绑定姿势投影 bbox（前端 500ms 重算上报，带 6px 容差），
+//!   不是逐像素 alpha 检测；蒙皮动画瞬时姿态超出绑定位的误差容差内吸收；
 //! - 松手一律恢复穿透 ON——模拟器面板开着时穿透本来也是关的，那时不会拖
 //!   宠物（用户在点面板），冲突场景可忽略；若未来出现"面板开着拖宠物"，
 //!   需要穿透状态权威化（记待办）；
 //! - 点击宠物（按下即松、无位移）v1 无互动语义，只当一次微型拖动（窗口不动），
 //!   点击互动（摸摸头/喂食）归 M1-6 行为层。
 
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::OnceLock;
 use std::thread;
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use tauri::WebviewWindow;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SetWindowPos, SystemParametersInfoW,
@@ -38,6 +40,17 @@ static DOWN_TX: OnceLock<SyncSender<(i32, i32)>> = OnceLock::new();
 /// 主窗 HWND 缓存（start 时写入）。WH_MOUSE_LL 回调里要用，不能带锁。
 /// 存 isize：裸 HWND(*mut c_void) 不实现 Send/Sync，static 存不了。
 static SELF_HWND: OnceLock<isize> = OnceLock::new();
+/// 宠物命中矩形（前端上报，窗口客户区物理像素，左上角 + 宽高）。
+/// 只有落在矩形内才允许"拎起"——窗口其余透明区域点击须穿透到桌面（
+/// 2026-11-22 用户实机投诉：点窗口透明部分下面的字先触发拖拽）。
+/// 四元组 AtomicI32 + ready 标志：钩子回调要快，禁止带锁。
+static HIT_RECT: [AtomicI32; 4] = [
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+];
+static HIT_READY: AtomicBool = AtomicBool::new(false);
 
 /// SWP_* 常量（winuser.h 稳定值；同 win_event.rs 的本地定义约定，避免 import 漂移）
 const SWP_NOSIZE: u32 = 0x0001;
@@ -89,24 +102,51 @@ pub fn on_left_button_down(x: i32, y: i32) {
         return;
     };
     let hwnd = hwnd_isize as HWND;
+    if !hit_test(hwnd, x, y) {
+        return; // 点在宠物外的透明区：不摘穿透，点击正常落到下层桌面窗口
+    }
     unsafe {
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        if windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect) == 0 {
-            return;
-        }
-        if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
-            return;
-        }
         let style = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, -20);
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, -20, style & !0x20);
     }
     if let Some(tx) = DOWN_TX.get() {
         let _ = tx.try_send((x, y)); // 满则丢：拖线程正忙，无法并发拖第二轮
+    }
+}
+
+/// 前端上报命中矩形（ipc 入口）。x/y/w/h 为 CSS 逻辑像素、相对窗口客户区左上角；
+/// 这里乘 scale factor 转物理像素存静态原子量。前端每 500ms 重算宠物投影 bbox、
+/// 变化才上报（见 main.ts reportHitRect）。
+pub fn set_hit_rect(scale: f64, x: f64, y: f64, w: f64, h: f64) {
+    let s = scale.max(1.0);
+    HIT_RECT[0].store((x * s).round() as i32, Ordering::Relaxed);
+    HIT_RECT[1].store((y * s).round() as i32, Ordering::Relaxed);
+    HIT_RECT[2].store((w * s).round() as i32, Ordering::Relaxed);
+    HIT_RECT[3].store((h * s).round() as i32, Ordering::Relaxed);
+    HIT_READY.store(true, Ordering::Relaxed);
+}
+
+/// 点 (x,y)（屏幕物理像素）是否落在宠物命中矩形内。
+/// 客户区原点用 ClientToScreen 现算——比缓存窗口偏移稳（框架内边随
+/// shadow/decorations 配置会变，2026-11-22 shadow:false 后内边为 0）。
+fn hit_test(hwnd: HWND, x: i32, y: i32) -> bool {
+    if !HIT_READY.load(Ordering::Relaxed) {
+        return false; // 前端还没报：宁可暂不可拖，也不整窗拦截
+    }
+    unsafe {
+        let mut origin = POINT { x: 0, y: 0 };
+        if ClientToScreen(hwnd, &mut origin) == 0 {
+            return false;
+        }
+        let hx = HIT_RECT[0].load(Ordering::Relaxed);
+        let hy = HIT_RECT[1].load(Ordering::Relaxed);
+        let hw = HIT_RECT[2].load(Ordering::Relaxed);
+        let hh = HIT_RECT[3].load(Ordering::Relaxed);
+        if hw <= 0 || hh <= 0 {
+            return false;
+        }
+        // 矩形是客户区内相对坐标，origin 即客户区左上角（物理像素）
+        x >= origin.x + hx && x < origin.x + hx + hw && y >= origin.y + hy && y < origin.y + hy + hh
     }
 }
 

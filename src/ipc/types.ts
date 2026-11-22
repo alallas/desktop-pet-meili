@@ -9,6 +9,11 @@ export const commands = {
 	ping: (msg: string) => __TAURI_INVOKE<string>("ping", { msg }),
 	/**  点击穿透开关（M0 验证命令，产品化后由窗口管理器接管） */
 	setClickThrough: (through: boolean) => __TAURI_INVOKE<void>("set_click_through", { through }),
+	/**
+	 *  宠物命中矩形上报（窗口拖拽 hit test 用）：只有点在宠物身上才"拎起"，
+	 *  透明区域点击穿透到桌面。坐标为 CSS 逻辑像素、相对客户区左上角。
+	 */
+	setPetHitRect: (x: number | null, y: number | null, w: number | null, h: number | null) => __TAURI_INVOKE<void>("set_pet_hit_rect", { x, y, w, h }),
 	/**  点击穿透下页面收不到鼠标事件，由 Rust 侧查询全局光标位置（M0-2） */
 	getCursorPosition: () => __TAURI_INVOKE<[number | null, number | null] | null>("get_cursor_position"),
 	/**  临时调试：前端状态写文件（截图不可靠时排查用，日志落 `%TEMP%\chaojiandai-debug.log`） */

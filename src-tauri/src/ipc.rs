@@ -192,6 +192,14 @@ pub fn set_click_through(through: bool, window: tauri::Window) {
     let _ = window.set_ignore_cursor_events(through);
 }
 
+/// 宠物命中矩形上报（窗口拖拽 hit test 用）：只有点在宠物身上才"拎起"，
+/// 透明区域点击穿透到桌面。坐标为 CSS 逻辑像素、相对客户区左上角。
+#[tauri::command]
+#[specta::specta]
+pub fn set_pet_hit_rect(x: f64, y: f64, w: f64, h: f64, window: tauri::Window) {
+    crate::window_drag::set_hit_rect(window.scale_factor().unwrap_or(1.0), x, y, w, h);
+}
+
 /// 点击穿透下页面收不到鼠标事件，由 Rust 侧查询全局光标位置（M0-2）
 #[tauri::command]
 #[specta::specta]

@@ -68,14 +68,20 @@ def main():
     parser.add_argument("--dx", type=int, default=-7)
     parser.add_argument("--dy", type=int, default=-5)
     parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--grab-fx", type=float, default=0.5,
+                        help="抓取点 x = 窗口宽的比例（0.5=水平居中，宠物锚点）")
+    parser.add_argument("--grab-fy", type=float, default=0.72,
+                        help="抓取点 y = 窗口高的比例（0.72≈宠物站姿躯干）")
+    parser.add_argument("--click-only", action="store_true",
+                        help="只点按不拖：验证透明区点击不触发拖拽（窗口应纹丝不动）")
     args = parser.parse_args()
 
     hwnd = find_pet_hwnd()
     r = wt.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r))
-    cx = (r.left + r.right) // 2
-    cy = (r.top + r.bottom) // 2
-    print(f"窗口 rect=({r.left},{r.top}) {r.right - r.left}x{r.bottom - r.top}，从中心 ({cx},{cy}) 抓起")
+    cx = r.left + int((r.right - r.left) * args.grab_fx)
+    cy = r.top + int((r.bottom - r.top) * args.grab_fy)
+    print(f"窗口 rect=({r.left},{r.top}) {r.right - r.left}x{r.bottom - r.top}，抓取点 ({cx},{cy})")
 
     sw = user32.GetSystemMetrics(0)
     sh = user32.GetSystemMetrics(1)
@@ -91,13 +97,13 @@ def main():
     # 2) 按下（WH_MOUSE_LL 应摘掉穿透并启动拖线程）
     send(MOUSEEVENTF_LEFTDOWN)
     print("LEFTDOWN 已注入")
-    # 3) 20 次绝对坐标移动，左上各 -7/-5 px，16ms 间隔（模拟人手拖动）。
-    #    必须用绝对坐标：相对移动会过鼠标加速曲线，16ms 一步被放大 ~2.8 倍，
-    #    窗口瞬间被甩到屏幕角落（2026-11-22 实测踩过）
-    for i in range(1, args.steps + 1):
-        ax, ay = abs_coords(cx + args.dx * i, cy + args.dy * i)
-        send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
-        time.sleep(0.016)
+    # 3) 绝对坐标移动（模拟人手拖动）。必须用绝对坐标：相对移动会过鼠标
+    #    加速曲线，16ms 一步被放大 ~2.8 倍，窗口瞬间被甩到屏幕角落（坑47）
+    if not args.click_only:
+        for i in range(1, args.steps + 1):
+            ax, ay = abs_coords(cx + args.dx * i, cy + args.dy * i)
+            send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
+            time.sleep(0.016)
     # 4) 松手
     send(MOUSEEVENTF_LEFTUP)
     print("LEFTUP 已注入")
@@ -106,6 +112,11 @@ def main():
     r2 = wt.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r2))
     dx, dy = r2.left - r.left, r2.top - r.top
+    if args.click_only:
+        # hit rect 生效后：点透明区不应摘穿透、不应拖窗（位移 0）
+        print(f"位移: ({dx},{dy})（click-only 预期 0）")
+        print("✅ 点击未触发拖拽（穿透正常）" if dx == 0 and dy == 0 else "❌ 透明区点击被拦截")
+        return
     exp_dx, exp_dy = args.dx * args.steps, args.dy * args.steps
     print(f"位移: ({dx},{dy})（预期 ≈ ({exp_dx},{exp_dy})，右下拖拽预期被工作区夹取截断）")
     if args.dx > 0 or args.dy > 0:

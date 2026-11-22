@@ -64,6 +64,7 @@ const actions = new Map<AnimName, THREE.AnimationAction>();
 let current: AnimName = "Idle";
 let headBone: THREE.Bone | null = null;
 let bboxInfo = "?";
+let petModel: THREE.Object3D | null = null;
 
 // 桌宠锚点：模型挂在锚点下并居中，锚点负责把桌宠摆到窗口内 NDC 位置。
 // 小窗形态（M1-1 定案 B 方案）：宠物居中偏下，头顶留白给气泡（窗内显示，
@@ -99,7 +100,9 @@ new GLTFLoader().load("/models/Soldier.glb", (gltf) => {
   // Mixamo 模型正面朝 +Z，与 RobotExpressive（-Z）相反，需转 180° 面向用户
   model.rotation.y = Math.PI;
   petAnchor.add(model);
+  petModel = model;
   layoutPet();
+  reportHitRect(); // 首报后立即可拖
 
   mixer = new THREE.AnimationMixer(model);
   for (const clip of gltf.animations) {
@@ -130,6 +133,55 @@ function play(name: AnimName) {
   from?.fadeOut(0.3);
   current = name;
 }
+
+// ---------- 拖拽命中矩形上报（M1-6）：只有点在宠物身上才"拎起" ----------
+// Rust 侧 WH_MOUSE_LL 钩子按下时按此矩形 hit test；透明区点击必须穿透到
+// 桌面（2026-11-22 用户实机投诉：点窗口透明部分下面的字先触发拖拽）。
+// 用绑定姿势投影 bbox 近似（蒙皮瞬时姿态误差由 6px 容差吸收），500ms 重算、
+// 变化 >4px 才上报，避免 invoke 噪音。
+const HIT_PADDING = 6;
+let lastHitRect = { x: -1, y: -1, w: 0, h: 0 };
+
+function petScreenBBox(): { x: number; y: number; w: number; h: number } | null {
+  if (!petModel) return null;
+  petModel.updateWorldMatrix(true, true);
+  const box = new THREE.Box3().setFromObject(petModel);
+  if (box.isEmpty()) return null;
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  const v = new THREE.Vector3();
+  for (const xi of [box.min.x, box.max.x])
+    for (const yi of [box.min.y, box.max.y])
+      for (const zi of [box.min.z, box.max.z]) {
+        v.set(xi, yi, zi).project(camera);
+        if (v.z < -1 || v.z > 1) continue; // 相机前后裁剪外的角点不参与
+        const sx = ((v.x + 1) / 2) * innerWidth;
+        const sy = ((1 - v.y) / 2) * innerHeight;
+        minX = Math.min(minX, sx);
+        minY = Math.min(minY, sy);
+        maxX = Math.max(maxX, sx);
+        maxY = Math.max(maxY, sy);
+      }
+  if (minX === Infinity) return null;
+  const x = Math.max(0, minX - HIT_PADDING);
+  const y = Math.max(0, minY - HIT_PADDING);
+  const w = Math.min(innerWidth, maxX + HIT_PADDING) - x;
+  const h = Math.min(innerHeight, maxY + HIT_PADDING) - y;
+  return { x, y, w, h };
+}
+
+function reportHitRect() {
+  const r = petScreenBBox();
+  if (!r) return;
+  if (Math.abs(r.x - lastHitRect.x) < 4 && Math.abs(r.y - lastHitRect.y) < 4 &&
+      Math.abs(r.w - lastHitRect.w) < 4 && Math.abs(r.h - lastHitRect.h) < 4) return;
+  lastHitRect = r;
+  void commands.setPetHitRect(r.x, r.y, r.w, r.h).catch(() => {});
+}
+
+setInterval(reportHitRect, 500);
 
 // ---------- 唤醒反馈（M1-3.5b 简化版）：跳一下 + "我在听"气泡 ----------
 // 占位模型动画表现力不足（Wave 未设 LoopOnce 会循环成"一直挥手"，且与 Idle 区分

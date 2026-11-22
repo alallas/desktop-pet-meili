@@ -138,6 +138,10 @@ fn run(
             None
         }
     };
+    // #23 流水线合成：sidecar 健在才开 worker——LLM 出句、合成、播放三者并行
+    let mut pipe = tts
+        .as_ref()
+        .map(|s| super::tts::SynthPipe::spawn(std::sync::Arc::clone(s)));
 
     let mut parts = EngineParts {
         spotter: &mut spotter,
@@ -146,6 +150,7 @@ fn run(
         thinker: thinker.as_mut(),
         tts: &tts,
         player: &mut player,
+        pipe: &mut pipe,
     };
     consume(bus, &mut parts, rx, &mut capture, comments, &behavior_ctrl);
     Ok(())
@@ -297,6 +302,8 @@ struct EngineParts<'a> {
     thinker: Option<&'a mut crate::llm::Thinker>,
     tts: &'a Option<super::tts::Shared>,
     player: &'a mut Option<super::player::Player>,
+    /// #23 流水线合成：None = sidecar 不可用（回复静默，其余路径用 sync speak_reply）
+    pipe: &'a mut Option<super::tts::SynthPipe>,
 }
 
 /// 看门狗阈值：超过此时长没收到任何采集块 = 断流（正常节奏是 0.1s 一块，
@@ -325,6 +332,10 @@ fn consume(
     let thinker = &mut parts.thinker;
     let tts = parts.tts;
     let player = &mut *parts.player;
+    // 流水线句柄：方法全是 &self，主循环与流式回调共享读即可
+    let pipe: &Option<super::tts::SynthPipe> = parts.pipe;
+    // 首音延迟记录（#23：流水线首次入队时打点；回复播完/被打断清零）
+    let mut first_audio_ms: Option<u128> = None;
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
     // VAD 侧对齐缓冲：0.1s 块（1600）非 512 倍数，攒到 4×512 再喂
     let mut vad_buf: Vec<f32> = Vec::new();
@@ -367,6 +378,9 @@ fn consume(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        // #23 流水线：取回后台已合成的句子入队播放（每 0.1s 节拍一次，
+        // 播放连续性靠"合成跑在播放前面"保证）
+        drain_synth(pipe.as_ref(), player, None, &mut first_audio_ms);
         // 行为引擎台词注入（M1-5）：仅 IDLE 态接收——不打断倾听与对话，
         // 说正中（SPEAKING）的评论由行为侧闸控丢弃（通道满即丢）
         if matches!(state, State::Idle) {
@@ -436,6 +450,12 @@ fn consume(
                                 if let Some(p) = player.as_mut() {
                                     p.stop();
                                 }
+                                // #23：作废剩余句子的后台合成——不打断的话
+                                // 旧句子合成完还会从管道里冒出来接着播
+                                if let Some(p) = pipe.as_ref() {
+                                    p.bump_gen();
+                                }
+                                first_audio_ms = None;
                                 publish_speak_ended(&bus, true);
                             }
                             let mut event = bus.event(
@@ -467,13 +487,17 @@ fn consume(
                             feed_vad(vad, &mut vad_buf, &chunk);
                         }
                     }
-                    // 播完检测：输出回调把"队列播空"翻成 !is_playing，这里接成事件
+                    // 播完检测：输出回调把"队列播空"翻成 !is_playing，这里接成事件。
+                    // #23：队列空但后台还有句子在合成/待取时不得判完——否则回复
+                    // 尾巴会被行为评论插话，前端也提前收嘴
                     if matches!(state, State::Speaking) {
+                        let pipe_pending = pipe.as_ref().is_some_and(|p| p.has_pending());
                         let finished = match player.as_mut() {
-                            Some(p) => !p.is_playing(),
-                            None => true,
+                            Some(p) => !p.is_playing() && !pipe_pending,
+                            None => !pipe_pending,
                         };
                         if finished {
+                            first_audio_ms = None;
                             publish_speak_ended(&bus, false);
                             state = State::Idle;
                         }
@@ -519,13 +543,13 @@ fn consume(
                                     );
                                     suppress_until = Some(Instant::now() + EMPTY_WAKE_SUPPRESS);
                                 }
-                                // 流式出声（#23-b + #32 逗号软切）：LLM 边生成边按
-                                // 气口合成入队，首音 ≈ 口癖尾巴生成+合成（~1.5–3s）
-                                // 而非整句完（8–17s）。期间引擎线程在流内，KWS 暂停
-                                // ——打断窗口只有 SPEAKING 态（同非流式思考阻塞期，
-                                // barge-in 语义不回归）。
+                                // 流式出声（#23-b + #32 逗号软切 + #23 流水线）：
+                                // LLM 边生成边按气口把句子派给后台合成 worker，
+                                // 首音 ≈ 口癖尾巴生成+合成（~1.5–3s）；句子间不再
+                                // 串行等合成（此前每句 1.5~3.6s 排队）。期间引擎
+                                // 线程在流内，KWS 暂停——打断窗口只有 SPEAKING 态
+                                // （同非流式思考阻塞期，barge-in 语义不回归）。
                                 let mut audio_enqueued = false;
-                                let mut first_audio_ms: Option<u128> = None;
                                 if meaningful {
                                     ensure_player(player);
                                 }
@@ -558,34 +582,34 @@ fn consume(
                                 if meaningful && !tier_command {
                                     if let Some(thinker) = thinker.as_deref_mut() {
                                         let t1 = Instant::now();
+                                        // #23：新轮回复 = 新代次，作废上一轮残余的
+                                        // 后台合成（打断路径已 bump，这里双保险）
+                                        let gen = pipe.as_ref().map(|p| p.bump_gen());
                                         let think_result =
                                             thinker.think_streaming(&text, |sentence| {
-                                                match speak_reply(
-                                                    tts.as_deref(),
-                                                    player.as_mut(),
-                                                    sentence,
-                                                ) {
-                                                    Ok(()) => {
-                                                        if first_audio_ms.is_none() {
-                                                            first_audio_ms =
-                                                                Some(t1.elapsed().as_millis());
-                                                            tracing::info!(
-                                                                elapsed_ms =
-                                                                    t1.elapsed().as_millis(),
-                                                                "tts first audio enqueued"
-                                                            );
-                                                        }
-                                                        audio_enqueued = true;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!(
-                                                        "tts speak failed, skip sentence: {e:#}"
-                                                    )
+                                                // 边出句边派发合成；顺手取回已完成的
+                                                // 句子入队——首句开嗓不必等整轮生成完
+                                                if let (Some(p), Some(g)) = (pipe.as_ref(), gen) {
+                                                    if let Err(e) = p.send(g, sentence) {
+                                                        tracing::error!("pipe send failed: {e}");
                                                     }
                                                 }
+                                                drain_synth(
+                                                    pipe.as_ref(),
+                                                    player,
+                                                    Some(t1),
+                                                    &mut first_audio_ms,
+                                                );
                                             });
                                         match think_result {
                                             Ok(reply) => {
+                                                // 收尾排空：流末尾已完成的句子取回来
+                                                drain_synth(
+                                                    pipe.as_ref(),
+                                                    player,
+                                                    Some(t1),
+                                                    &mut first_audio_ms,
+                                                );
                                                 tracing::info!(
                                                     latency_ms = t1.elapsed().as_millis(),
                                                     text = %reply,
@@ -598,8 +622,13 @@ fn consume(
                                                 );
                                             }
                                             Err(e) => {
-                                                // 流式失败兜底：整句兜底话术走一次性合成
+                                                // 流式失败兜底：作废本轮已派发的句子
+                                                // （防旧句混入兜底话术），整句兜底走
+                                                // 一次性同步合成
                                                 tracing::error!("think failed: {e:#}");
+                                                if let Some(p) = pipe.as_ref() {
+                                                    p.bump_gen();
+                                                }
                                                 let fallback =
                                                     crate::llm::FALLBACK_REPLY.to_string();
                                                 if speak_reply(
@@ -619,6 +648,16 @@ fn consume(
                                             }
                                         }
                                     }
+                                }
+                                // 在播或在后台合成中的回复音频都算"有声"（#23：
+                                // 流水线下 think 返回时首句可能还在合成，不能
+                                // 因尚未入队就回 IDLE——否则后台句子冒出来时状态
+                                // 已 IDLE，行为评论会插话）
+                                if !audio_enqueued
+                                    && (pipe.as_ref().is_some_and(|p| p.has_pending())
+                                        || player.as_ref().is_some_and(|p| p.is_playing()))
+                                {
+                                    audio_enqueued = true;
                                 }
                                 // 碎语：出声追问（用户可再喊一次名字重试）；
                                 // 正常：有音频则播完回 IDLE，无音频（合成失败）直接回
@@ -730,8 +769,44 @@ fn ensure_player(player: &mut Option<super::player::Player>) {
     }
 }
 
+/// 排空流水线合成结果（#23）：有效结果入播放器，过期代次丢弃。
+/// reply_t1 为该轮回复起始时刻——首次入队时记首音延迟；播放器缺失时
+/// lazy 重建（ensure_player，坑 39 后输出设备可恢复）。
+fn drain_synth(
+    pipe: Option<&super::tts::SynthPipe>,
+    player: &mut Option<super::player::Player>,
+    reply_t1: Option<Instant>,
+    first_audio_ms: &mut Option<u128>,
+) {
+    let Some(pipe) = pipe else { return };
+    while let Some(done) = pipe.pop_valid() {
+        match done.wav {
+            Ok(bytes) => {
+                ensure_player(player);
+                if let Some(p) = player.as_mut() {
+                    match p.play_wav(&bytes) {
+                        Ok(()) => {
+                            if let (Some(t0), None) = (reply_t1, *first_audio_ms) {
+                                *first_audio_ms = Some(t0.elapsed().as_millis());
+                                tracing::info!(
+                                    elapsed_ms = t0.elapsed().as_millis(),
+                                    "tts first audio enqueued"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!("pipe play failed: {e}"),
+                    }
+                }
+            }
+            Err(e) => tracing::error!(text = %done.text, "pipe synth failed: {e}"),
+        }
+    }
+}
+
 /// 合成 + 播放一句回复（M1-3.5b）。合成阻塞 ~1–3s（与 ASR/LLM 同级，引擎线程
 /// 容忍短暂漏听唤醒）；播放本身非阻塞（队列 + 输出回调，见 player.rs）。
+/// #23 起仅兜底话术/追问/档位确认/行为评论走这条同步路径——多句回复走
+/// SynthPipe 流水线（LLM 出句与合成并行，句子间零等待）。
 fn speak_reply(
     tts: Option<&super::tts::TtsSidecar>,
     player: Option<&mut super::player::Player>,

@@ -214,6 +214,127 @@ pub fn prewarm(sidecar: Shared, lines: Vec<String>) {
     });
 }
 
+/// 流水线化合成（#23）：后台 worker 线程串行消费合成任务，LLM 流式出句、
+/// TTS 合成、播放三者并行——多句回复不再句句串行等 1.5~3.6s 合成。
+///
+/// 生产者-消费者 + 代次作废（generation token）：
+/// - 引擎（生产者）把句子 `send` 进有界通道（背压：worker 跟不上时阻塞 LLM
+///   流读取，天然限流），`bump_gen` 开新一轮对话/打断时递增代次；
+/// - worker（单消费者，保句子顺序）发现任务代次过期直接丢弃（不浪费合成），
+///   合成完把 wav 字节连同代次发回；引擎 drain 时丢弃过期代次的结果。
+/// - `in_flight`/`ready` 两个计数让引擎能在"队列恰好播空但后续句子还在
+///   合成"时不误判回复结束（防提前 SpeakEnded → 提前回 Idle 被评论插话）。
+pub struct SynthPipe {
+    tx: std::sync::mpsc::SyncSender<SynthJob>,
+    /// 引擎侧消费端（只有引擎线程读，故 Receiver 无需共享）
+    rx: Receiver<SynthDone>,
+    /// 当前代次：引擎 bump、worker 比对，打断/新轮回复时旧任务整体作废
+    gen: Arc<std::sync::atomic::AtomicU64>,
+    /// 已派发未完成的任务数（引擎 +1，worker 完成/丢弃 -1）
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// 已完成待引擎取走的结果数（worker +1，引擎 drain -1）
+    ready: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+pub struct SynthJob {
+    pub gen: u64,
+    pub text: String,
+}
+
+pub struct SynthDone {
+    pub gen: u64,
+    pub text: String,
+    /// 合成产物（wav 全字节，引擎直接入播放器；读文件也收进 worker）
+    pub wav: Result<Vec<u8>, String>,
+}
+
+/// 背压上限：在途 + 待取结果合计不超过 8 句（LLM 流读取被自然阻塞）
+const PIPE_CAP: usize = 8;
+
+impl SynthPipe {
+    /// 启动 worker 线程。sidecar 由 pipe 共享持有——引擎线程另有 Arc 引用
+    /// （预热也持有），pipe 只为 worker 续命。
+    pub fn spawn(sidecar: Shared) -> Self {
+        let (tx, rx_jobs) = std::sync::mpsc::sync_channel::<SynthJob>(PIPE_CAP);
+        let (tx_done, rx) = channel::<SynthDone>();
+        let gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let gen = Arc::clone(&gen);
+            let in_flight = Arc::clone(&in_flight);
+            let ready = Arc::clone(&ready);
+            std::thread::spawn(move || {
+                use std::sync::atomic::Ordering::Relaxed;
+                while let Ok(job) = rx_jobs.recv() {
+                    // 代次作废：引擎已开新轮/打断，旧句子不值得再合成
+                    if job.gen != gen.load(Relaxed) {
+                        in_flight.fetch_sub(1, Relaxed);
+                        continue;
+                    }
+                    let wav = sidecar.synth(&job.text).and_then(|p| {
+                        std::fs::read(&p).map_err(|e| format!("读 wav 失败 {p:?}: {e}"))
+                    });
+                    ready.fetch_add(1, Relaxed);
+                    // 引擎已退出则发送失败：计数留着无妨（进程收尾）
+                    let _ = tx_done.send(SynthDone {
+                        gen: job.gen,
+                        text: job.text,
+                        wav,
+                    });
+                    in_flight.fetch_sub(1, Relaxed);
+                }
+            });
+        }
+        Self {
+            tx,
+            rx,
+            gen,
+            in_flight,
+            ready,
+        }
+    }
+
+    /// 新一轮对话：代次 +1（旧在途任务与结果整体作废）。返回新代次。
+    pub fn bump_gen(&self) -> u64 {
+        self.gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
+    /// 派发一句合成。在途计数 +1（worker 完成/作废时 -1）。
+    pub fn send(&self, gen: u64, text: &str) -> Result<(), String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.in_flight.fetch_add(1, Relaxed);
+        self.tx
+            .try_send(SynthJob {
+                gen,
+                text: text.to_string(),
+            })
+            .map_err(|e| {
+                self.in_flight.fetch_sub(1, Relaxed);
+                format!("合成队列不可用: {e}")
+            })
+    }
+
+    /// 取一个有效结果：弹出一条已完成合成，过期代次返回 None（已消费且
+    /// ready 计数已扣）。引擎循环 while let Some(d) = pop_valid()。
+    pub fn pop_valid(&self) -> Option<SynthDone> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let done = self.rx.try_recv().ok()?;
+        self.ready.fetch_sub(1, Relaxed);
+        if done.gen != self.gen.load(Relaxed) {
+            return None; // 过期：丢弃，继续取
+        }
+        Some(done)
+    }
+
+    /// 是否还有未完成的回复音频（在途 + 待取）。引擎"播完"判定用——
+    /// 队列恰好播空但后续句子仍在合成时不得提前判结束。
+    pub fn has_pending(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.in_flight.load(Relaxed) > 0 || self.ready.load(Relaxed) > 0
+    }
+}
+
 /// 探测 Python 解释器：env 覆盖（测试/打包注入）> 托管 venv（本机开发环境）> PATH。
 /// 打包期固化 venv 是待办 #14 同类，届时 find_python 整体换实现。
 fn find_python() -> Result<String, String> {
@@ -270,6 +391,78 @@ mod tests {
             Some(Err((3, msg))) => assert!(msg.contains("模型未加载")),
             _ => panic!("ERR 解析失败"),
         }
+    }
+
+    /// 手工构造 pipe（不起 worker）：验证代次作废过滤与计数语义
+    fn make_pipe() -> (
+        SynthPipe,
+        std::sync::mpsc::Sender<SynthDone>,
+        std::sync::mpsc::Receiver<SynthJob>,
+    ) {
+        let (tx, rx_jobs) = std::sync::mpsc::sync_channel(4);
+        let (tx_done, rx) = channel();
+        let pipe = SynthPipe {
+            tx,
+            rx,
+            gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ready: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        (pipe, tx_done, rx_jobs)
+    }
+
+    fn done(gen: u64) -> SynthDone {
+        SynthDone {
+            gen,
+            text: format!("句{gen}"),
+            wav: Ok(vec![1, 2, 3]),
+        }
+    }
+
+    #[test]
+    fn pipe_stale_gen_results_dropped_fifo_order_kept() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (pipe, tx_done, _rx_jobs) = make_pipe();
+        // 代次 0 的两条 + 新代次 1 的一条（bump 后 0 即过期）
+        tx_done.send(done(0)).unwrap();
+        tx_done.send(done(0)).unwrap();
+        pipe.ready.store(3, Relaxed);
+        tx_done.send(done(1)).unwrap();
+        assert_eq!(pipe.bump_gen(), 1);
+        assert!(pipe.pop_valid().is_none(), "过期代次第一条丢弃");
+        assert!(pipe.pop_valid().is_none(), "过期代次第二条丢弃");
+        let d = pipe.pop_valid().expect("新代次应取到");
+        assert_eq!(d.gen, 1);
+        assert!(pipe.pop_valid().is_none(), "取空");
+    }
+
+    #[test]
+    fn pipe_pending_reflects_in_flight_and_ready() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (pipe, tx_done, _rx_jobs) = make_pipe();
+        assert!(!pipe.has_pending());
+        pipe.in_flight.store(1, Relaxed);
+        assert!(pipe.has_pending(), "在途即 pending");
+        pipe.in_flight.store(0, Relaxed);
+        tx_done.send(done(0)).unwrap();
+        pipe.ready.store(1, Relaxed);
+        assert!(pipe.has_pending(), "待取即 pending");
+        assert!(pipe.pop_valid().is_some());
+        assert!(!pipe.has_pending(), "取空后释放");
+    }
+
+    #[test]
+    fn pipe_send_backpressure_full_channel_errs() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (pipe, _tx_done, rx_jobs) = make_pipe(); // 容量 4
+        for _ in 0..4 {
+            pipe.send(0, "句子").unwrap();
+        }
+        assert_eq!(pipe.in_flight.load(Relaxed), 4);
+        // 队列满：派发失败且在途计数回滚
+        assert!(pipe.send(0, "溢出").is_err());
+        assert_eq!(pipe.in_flight.load(Relaxed), 4, "失败派发不得漏计数");
+        drop(rx_jobs);
     }
 
     #[test]

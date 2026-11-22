@@ -211,6 +211,9 @@ void events.eventStream.listen((e) => {
 const cursorNDC = new THREE.Vector2(0, -0.5); // 默认看向下方（"坐着"的感觉）
 const cursorTarget = new THREE.Vector3(0, 0.6, 2);
 
+let lastCursorActive = 0; // #36：光标在动 = 活跃，恢复满帧（performance.now() 截止戳）
+const _prevNdc = new THREE.Vector2(0, 0);
+
 async function pollCursor() {
   const [cx, cy] = (await invoke("get_cursor_position")) as [number, number];
   const pos = await win.outerPosition();
@@ -218,6 +221,11 @@ async function pollCursor() {
   // 屏幕坐标 → 窗口 NDC
   const x = ((cx - pos.x) / size.width) * 2 - 1;
   const y = -(((cy - pos.y) / size.height) * 2 - 1);
+  // 降帧依据：光标移动即活跃（静止悬停不算——盯人低频刷新足够跟手）
+  if (Math.abs(x - _prevNdc.x) > 0.005 || Math.abs(y - _prevNdc.y) > 0.005) {
+    lastCursorActive = performance.now();
+    _prevNdc.set(x, y);
+  }
   cursorNDC.set(x, y);
 }
 setInterval(pollCursor, 100);
@@ -266,12 +274,36 @@ function applyGaze() {
 }
 
 // ---------- 主循环 ----------
+// #36 渲染降帧：满帧 120FPS 实测烧 ~46% 单核（§11 #20 采样），静默常驻功耗
+// 红线（<1%）要求空闲时压帧。活跃态（唤醒反馈/说话/面板/光标移动/非常驻
+// 动画）回 60FPS 保手感；其余 15FPS——Idle 动画略降采样但占位模型阶段可接受。
+const IDLE_FPS = 15;
+const ACTIVE_FPS = 60;
+let lastRenderAt = 0;
+let simOpen = false; // 模拟器面板开关（事件驱动，Rust 热键为权威）
+
+function renderActive(now: number): boolean {
+  return (
+    now < bubbleUntil || // "我在听"气泡
+    now < speechUntil || // 说话气泡
+    now < gazeOverrideUntil || // 强制注视（唤醒反馈）
+    now - hopStart < HOP_MS || // 跳跃进行中
+    simOpen || // 模拟器面板开
+    now - lastCursorActive < 2000 || // 光标最近在动
+    current !== "Idle" // Walk/Run 等非常驻动画
+  );
+}
+
 const clock = new THREE.Clock();
 let frames = 0;
 let fpsTime = 0;
 let fps = 0;
 
 function tick() {
+  const now = performance.now();
+  const minMs = 1000 / (renderActive(now) ? ACTIVE_FPS : IDLE_FPS);
+  if (now - lastRenderAt < minMs) return; // 降帧帧：整帧跳过（动画 dt 自然累计）
+  lastRenderAt = now;
   const dt = clock.getDelta();
   mixer?.update(dt);
   applyGaze(); // 必须在 mixer.update 之后，动画每帧会覆写骨骼旋转
@@ -525,8 +557,6 @@ resetBtn.onclick = () => {
     .catch((err) => simLog(`异常: ${String(err)}`));
 };
 simPanel.appendChild(resetBtn);
-
-let simOpen = false;
 
 // 面板开关权威在 Rust（全局热键），前端按事件同步显示与穿透状态
 void events.simPanel.listen((e) => {

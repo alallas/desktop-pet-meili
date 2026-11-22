@@ -174,11 +174,14 @@ impl GateEngine {
     /// 排障刚需（"她为什么没说话"必须能从日志直接读到闸门结论）
     pub fn on_event(&mut self, event: &StdEvent, map: &BehaviorMap) -> GateOutcome {
         let Some((idx, entry)) = map.find(event, |i| self.entry_cooldown_done(i)) else {
-            // 无匹配 / 条目冷却中：正常沉默（两者同一出口，payload 条件不满足也走这里）
+            // 无匹配 / 条目冷却中：台词正常沉默（两者同一出口，payload 条件不满足也走这里）。
+            // 但条目冷却只沉默台词不沉默触感反馈——反应与台词解耦的延伸（摸头冷却期内
+            // 再摸：不重复说台词，但照样跳一下，不然她像死了）
+            let react = map.find(event, |_| true).and_then(|(_, e)| e.anim.clone());
             tracing::info!(kind = ?event.kind, "gate: drop (no match / entry cooldown)");
             return GateOutcome {
                 decision: GateDecision::Drop,
-                react: None,
+                react,
             };
         };
         // 闸③内容门槛（P2 永远沉淀；沉默档全沉淀）
@@ -554,6 +557,36 @@ say = ["在的"]
             "闸④心情差时直接交互也应静默"
         );
         assert!(out.react.is_none());
+    }
+
+    #[test]
+    fn entry_cooldown_silences_speech_but_keeps_reaction() {
+        // 摸头条目冷却期内再摸：台词沉默（同类冷却=正常沉默，不进队列），
+        // 但触感反馈（anim）照样下发——反应与台词解耦（闸拦"说话"不拦"跳一下"）
+        let map = BehaviorMap::parse(
+            r#"[[map]]
+on = "mouse_clicked"
+anim = "petted"
+cooldown_min = 3
+say = ["摸头"]
+"#,
+        );
+        let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
+        let click = evt(EventKind::MouseClicked);
+        assert!(matches!(
+            g.on_event(&click, &map).decision,
+            GateDecision::Speak(_)
+        ));
+        let second = g.on_event(&click, &map);
+        assert!(
+            matches!(second.decision, GateDecision::Drop),
+            "条目冷却内重复摸头应沉默台词"
+        );
+        assert_eq!(
+            second.react.as_deref(),
+            Some("petted"),
+            "冷却内再摸仍应跳一下（解耦：只沉默台词）"
+        );
     }
 
     #[test]

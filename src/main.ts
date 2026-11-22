@@ -65,10 +65,12 @@ let current: AnimName = "Idle";
 let headBone: THREE.Bone | null = null;
 let bboxInfo = "?";
 
-// 桌宠锚点：模型挂在锚点下并居中，锚点负责把桌宠摆到屏幕指定 NDC 位置
-// M0 调试期固定在右下角（不挡用户工作区），未来改为沿屏幕边缘游走
-const PET_NDC = { x: 0.72, y: -0.62 };
-const PET_HEIGHT = 1.5; // 世界单位
+// 桌宠锚点：模型挂在锚点下并居中，锚点负责把桌宠摆到窗口内 NDC 位置。
+// 小窗形态（M1-1 定案 B 方案）：宠物居中偏下，头顶留白给气泡（窗内显示，
+// Windows 透明窗内容画出窗口边界会被裁剪）。
+// 屏幕级游走（巡逻/坐标题栏）= 窗口级移动，归 M1-6 表现层（Rust SetWindowPos）
+const PET_NDC = { x: 0, y: -0.5 };
+const PET_HEIGHT = 1.3; // 世界单位
 const petAnchor = new THREE.Group();
 scene.add(petAnchor);
 
@@ -154,7 +156,7 @@ document.body.appendChild(bubble);
 // ReplyReady 在整句生成完才发，气泡比开腔略晚（行为评论是整句台词无此问题）。
 const speechBubble = document.createElement("div");
 speechBubble.style.cssText =
-  "position:fixed;display:none;max-width:340px;padding:8px 14px;background:#fff;color:#111;" +
+  "position:fixed;display:none;max-width:270px;padding:8px 14px;background:#fff;color:#111;" +
   "border:2px solid #ff9e4a;border-radius:14px;font:15px/1.5 sans-serif;" +
   "box-shadow:0 3px 12px rgba(0,0,0,.3);" +
   "transform:translate(-50%,-130%);z-index:98;pointer-events:none;white-space:normal";
@@ -435,7 +437,7 @@ void events.booted.listen((e) => {
 // 贯穿 M1 全部阶段的调试工具：采集器对不对，看它最直接。
 const monitor = document.createElement("pre");
 monitor.style.cssText =
-  "position:fixed;left:8px;top:8px;width:380px;max-height:32vh;overflow-y:auto;margin:0;" +
+  "position:fixed;left:8px;top:8px;width:284px;max-height:32vh;overflow-y:auto;margin:0;" +
   "padding:5px 7px;background:rgba(0,0,0,.6);color:#9fe8c0;font:10px/1.4 monospace;" +
   "pointer-events:none;white-space:pre-wrap;word-break:break-all;display:none;z-index:99;" +
   "border-radius:6px";

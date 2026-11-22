@@ -80,12 +80,22 @@ fn main() {
     tauri::Builder::default()
         .setup(move |app| {
             let win = app.get_webview_window("main").unwrap();
-            // 窗口铺满主显示器（避免写死分辨率，兼容不同屏幕/DPI）
+            // 小窗形态（§3.5 M1-1 定案）：主窗 = 300×400 透明小窗（tauri.conf），
+            // 不再铺满屏幕。初始定位主显示器右下角（不挡工作区）；
+            // 任务栏避让/多显示器/拖拽跟随随 M1-6 窗口管理细化
             if let Ok(Some(monitor)) = app.primary_monitor() {
-                let size = monitor.size();
-                let pos = monitor.position();
-                let _ = win.set_size(tauri::Size::Physical(*size));
-                let _ = win.set_position(tauri::Position::Physical(*pos));
+                if let Ok(win_size) = win.outer_size() {
+                    let margin = (24.0 * monitor.scale_factor()) as i32;
+                    let x = monitor.position().x + monitor.size().width as i32
+                        - win_size.width as i32
+                        - margin;
+                    let y = monitor.position().y + monitor.size().height as i32
+                        - win_size.height as i32
+                        - margin;
+                    let _ = win.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition::new(x, y),
+                    ));
+                }
             }
             // M0 验证：默认点击穿透，悬浮层不阻塞桌面操作
             let _ = win.set_ignore_cursor_events(true);

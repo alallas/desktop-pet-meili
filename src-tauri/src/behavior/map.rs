@@ -64,11 +64,16 @@ pub struct BehaviorMap {
 }
 
 impl BehaviorMap {
+    /// 映射表文件路径（热更轮询 mtime 用）
+    pub fn path(creature_id: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/creatures")
+            .join(format!("{creature_id}.map.toml"))
+    }
+
     /// 加载 <id>.map.toml；缺失/损坏回退内置 meili 副本
     pub fn load(creature_id: &str) -> Self {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("resources/creatures")
-            .join(format!("{creature_id}.map.toml"));
+        let path = Self::path(creature_id);
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
@@ -77,6 +82,20 @@ impl BehaviorMap {
             }
         };
         Self::parse(&text)
+    }
+
+    /// 热更用严格解析：失败返回 Err（调用方保留旧表），**不做内置兜底**——
+    /// 兜底只适合启动路径；热更把整表换回内置副本会静默覆盖用户正在编辑的内容
+    pub fn parse_strict(text: &str) -> Result<Self, String> {
+        let file: BehaviorMapFile = toml::from_str(text).map_err(|e| format!("{e}"))?;
+        Ok(Self::validate(file.map))
+    }
+
+    /// 热更入口：读文件 + 严格解析。文件消失（误删/移动）视为 Err 保留旧表
+    pub fn reload(creature_id: &str) -> Result<Self, String> {
+        let text = std::fs::read_to_string(Self::path(creature_id))
+            .map_err(|e| format!("读映射表失败: {e}"))?;
+        Self::parse_strict(&text)
     }
 
     /// 解析 + 校验。格式错误的条目逐条告警跳过（定案：不拖垮整表）。
@@ -176,6 +195,36 @@ pub fn fill_template(template: &str, payload: &serde_json::Value) -> Option<Stri
 mod tests {
     use super::*;
     use crate::ipc::{EventSource, PrivacyTier};
+
+    /// #34 热更：严格解析——坏文件返回 Err（调用方保留旧表），不做内置兜底
+    #[test]
+    fn parse_strict_errors_on_bad_toml() {
+        assert!(BehaviorMap::parse_strict("[[map]\non = \"booted\"").is_err());
+        assert!(BehaviorMap::parse_strict("not toml at all").is_err());
+        let ok = BehaviorMap::parse_strict(
+            r#"[[map]]
+on = "booted"
+say = ["你好"]
+"#,
+        );
+        assert!(ok.is_ok(), "合法表应解析成功");
+        assert_eq!(ok.unwrap().entries.len(), 1);
+    }
+
+    /// #34 热更：整体解析失败不做兜底（区别于启动路径 parse 的内置副本回退）
+    #[test]
+    fn parse_strict_no_embedded_fallback() {
+        // 合法 toml 但 on 非法：validate 逐条跳过 → 空表；这不是"解析失败"，
+        // 空表本身合法（可能用户正在清空重写）——调用方按新表生效
+        let empty = BehaviorMap::parse_strict(
+            r#"[[map]]
+on = "not_a_kind"
+say = ["x"]
+"#,
+        )
+        .unwrap();
+        assert!(empty.entries.is_empty());
+    }
 
     fn evt(kind: EventKind, payload: serde_json::Value) -> StdEvent {
         StdEvent {

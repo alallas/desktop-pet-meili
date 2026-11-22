@@ -44,7 +44,11 @@ pub fn start(
             tid = crate::event_collector::tid(),
             "behavior engine thread up"
         );
-        let behavior_map = BehaviorMap::load("meili");
+        let mut behavior_map = BehaviorMap::load("meili");
+        // 热更（#34）：轮询映射表 mtime，变了就严格解析重载；失败保留旧表。
+        // 与 CPU 采样共用 TICK 节拍——内容工具，秒级生效足够，不添文件监听依赖
+        let map_path = BehaviorMap::path("meili");
+        let mut map_mtime = std::fs::metadata(&map_path).and_then(|m| m.modified()).ok();
         let mut gates = GateEngine::new(
             behavior_map.entries.len(),
             FrequencyTier::Balanced,
@@ -99,6 +103,26 @@ pub fn start(
             if last_tick.elapsed() >= TICK {
                 gates.tick();
                 last_tick = Instant::now();
+                // 映射表热更：mtime 变了 → 严格解析重载（失败保留旧表并 error）。
+                // 编辑器保存即触发，秒级生效；mtime 取不到（文件短暂消失）视为无变化
+                let new_mtime = std::fs::metadata(&map_path).and_then(|m| m.modified()).ok();
+                if new_mtime.is_some() && new_mtime != map_mtime {
+                    map_mtime = new_mtime;
+                    match BehaviorMap::reload("meili") {
+                        Ok(new_map) => {
+                            gates.resize_entries(new_map.entries.len());
+                            let n = new_map.entries.len();
+                            behavior_map = new_map;
+                            tracing::info!(
+                                entries = n,
+                                "behavior map hot reloaded (#34，保存即生效)"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("映射表热更失败，保留旧表: {e}");
+                        }
+                    }
+                }
             }
             if let Some(text) = gates.release_queue() {
                 send_comment(&comment_tx, text);

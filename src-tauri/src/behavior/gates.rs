@@ -170,6 +170,15 @@ impl GateEngine {
         self.cpu.tick();
     }
 
+    /// 热更映射表后同步条目冷却向量长度（#34）。冷却按下标对条目——
+    /// 热更后同一下标可能是别的条目，旧冷却不可移植：新增/保留位一律重置为
+    /// 立即可用（放行好过错杀：顶多少说一句，不会让用户的新台词不生效），
+    /// 超出新表长度的位截断
+    pub fn resize_entries(&mut self, new_len: usize) {
+        self.entry_cooled_at.clear();
+        self.entry_cooled_at.resize(new_len, Instant::now());
+    }
+
     /// 事件入口：逐闸判定。每道闸的判定留 info 级日志——场景模拟器测试期的
     /// 排障刚需（"她为什么没说话"必须能从日志直接读到闸门结论）
     pub fn on_event(&mut self, event: &StdEvent, map: &BehaviorMap) -> GateOutcome {
@@ -587,6 +596,33 @@ say = ["摸头"]
             Some("petted"),
             "冷却内再摸仍应跳一下（解耦：只沉默台词）"
         );
+    }
+
+    #[test]
+    fn resize_entries_resets_cooldowns() {
+        // #34 热更：条目冷却向量按下标对条目，重载后旧冷却不可移植——
+        // 全部重置为立即可用（放行好过错杀）；长度同步截断/扩展
+        let map = map_one("你好");
+        let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
+        let evt = evt(EventKind::Booted);
+        assert!(matches!(
+            g.on_event(&evt, &map).decision,
+            GateDecision::Speak(_)
+        ));
+        // 首条已 spoken（条目冷却 + 全局冷却双双激活）。热更 resize 后条目冷却
+        // 重置 → 不再被条目冷却 Drop（决策进入闸②排队——全局冷却是另一道闸，
+        // 本测试不碰它；不 resize 时第二次是 Drop，见
+        // same_entry_twice_dropped_by_entry_cooldown 对照组）
+        g.resize_entries(1);
+        assert!(
+            !matches!(g.on_event(&evt, &map).decision, GateDecision::Drop),
+            "热更后条目冷却应重置为立即可用（不被条目冷却 Drop）"
+        );
+        // 扩展：新下标立即可用
+        g.resize_entries(5);
+        assert!(g.entry_cooldown_done(4));
+        // 截断：越界访问不 panic（向量已缩短）
+        g.resize_entries(1);
     }
 
     #[test]

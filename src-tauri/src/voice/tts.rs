@@ -335,14 +335,23 @@ impl SynthPipe {
     }
 }
 
-/// 探测 Python 解释器：env 覆盖（测试/打包注入）> 托管 venv（本机开发环境）> PATH。
-/// 打包期固化 venv 是待办 #14 同类，届时 find_python 整体换实现。
+/// 探测 TTS sidecar 的 Python 解释器（#14 固化后的优先级）：
+/// env 覆盖（测试/打包注入）> **仓库自有 venv**（tools/tts-venv，
+/// scripts/setup-tts-venv.ps1 产物，锁定版本 + 懒加载补丁，打包即带走）>
+/// 本机托管 venv（开发机遗留兜底）> PATH 上的 python（报错信息可见，不静默）
 fn find_python() -> Result<String, String> {
     if let Ok(p) = std::env::var("CHAOJIANDAI_PYTHON") {
         if std::path::Path::new(&p).exists() {
             return Ok(p);
         }
     }
+    let repo_venv = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tools/tts-venv/Scripts/python.exe");
+    if repo_venv.exists() {
+        return Ok(repo_venv.to_string_lossy().into_owned());
+    }
+    // 开发机兜底：Kimi 托管 venv（坑 16 打过补丁的那份）。新机器应跑
+    // setup-tts-venv.ps1 生成仓库 venv，不走这里
     let managed = r"D:\KimiData\daimon-share\daimon\runtime\python\.venv\Scripts\python.exe";
     if std::path::Path::new(&managed).exists() {
         return Ok(managed.into());

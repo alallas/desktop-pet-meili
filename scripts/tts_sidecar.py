@@ -6,6 +6,7 @@
 # #35：文本→wav 缓存（dict）——行为评论的 map.toml 变体是有限的，
 # 后台预热后重复/预合成台词零合成延迟；cleanup 只删不在缓存里的文件。
 # 用法: python scripts/tts_sidecar.py
+import os
 import sys
 import tempfile
 import time
@@ -16,6 +17,13 @@ ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 OUT_DIR = Path(tempfile.gettempdir()) / "chaojiandai-tts"
 CACHE_CAP = 150  # 缓存上限：超出后按插入序驱逐（模板台词 ~30 条 + 会话台词，余量充足）
+
+# #14：vendor 了离线 HF 缓存（setup-tts-venv.ps1 产物）就走纯离线——
+# 运行期绝不触网；未 vendor（其他机器首装）保持默认行为回退在线下载
+HF_CACHE = MODELS / "hf-cache"
+if HF_CACHE.exists():
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_CACHE", str(HF_CACHE))
 
 # 文本 → wav 路径。缓存是"零合成延迟"的核心，cleanup 以它为准。
 CACHE: dict[str, Path] = {}

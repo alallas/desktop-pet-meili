@@ -208,21 +208,25 @@ impl GateEngine {
                 react,
             };
         };
-        // 闸①打字密集：非 P0 排队（P0 极重要放行）
-        if entry.priority > 0 && (self.probes.typing_dense)() {
-            tracing::info!(kind = ?event.kind, "gate① typing dense → queue");
-            return GateOutcome {
-                decision: self.enqueue(text, entry),
-                react,
-            };
-        }
-        // 闸②全局冷却：排队
-        if !self.global_cooldown_done() {
-            tracing::info!(kind = ?event.kind, "gate② global cooldown → queue");
-            return GateOutcome {
-                decision: self.enqueue(text, entry),
-                react,
-            };
+        // 直接交互（摸头等用户主动发起）：旁路闸①②，与语音对话通道同原则——
+        // 用户当面互动必须当场回应（闸③④仍生效）
+        if !entry.direct {
+            // 闸①打字密集：非 P0 排队（P0 极重要放行）
+            if entry.priority > 0 && (self.probes.typing_dense)() {
+                tracing::info!(kind = ?event.kind, "gate① typing dense → queue");
+                return GateOutcome {
+                    decision: self.enqueue(text, entry),
+                    react,
+                };
+            }
+            // 闸②全局冷却：排队
+            if !self.global_cooldown_done() {
+                tracing::info!(kind = ?event.kind, "gate② global cooldown → queue");
+                return GateOutcome {
+                    decision: self.enqueue(text, entry),
+                    react,
+                };
+            }
         }
         self.mark_spoken(idx, entry);
         GateOutcome {
@@ -455,6 +459,101 @@ say = ["在的"]
             g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Drop
         ));
+    }
+
+    #[test]
+    fn direct_entry_bypasses_global_cooldown_with_control() {
+        // direct=true（用户主动发起的直接交互：摸头/喂食）：旁路闸②，当场回应；
+        // 非 direct 条目在全局冷却内仍排队（对照组锁定语义差异）
+        let map = BehaviorMap::parse(
+            r#"[[map]]
+on = "booted"
+say = ["你好"]
+
+[[map]]
+on = "ping"
+direct = true
+say = ["在的"]
+
+[[map]]
+on = "foreground_switched"
+say = ["普通评论"]
+"#,
+        );
+        let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
+        assert!(matches!(
+            g.on_event(&evt(EventKind::Booted), &map).decision,
+            GateDecision::Speak(_)
+        ));
+        match g.on_event(&evt(EventKind::Ping), &map).decision {
+            GateDecision::Speak(t) => assert_eq!(t, "在的"),
+            _ => panic!("直接交互应旁路闸②当场回应"),
+        }
+        assert!(
+            matches!(
+                g.on_event(&evt(EventKind::ForegroundSwitched), &map)
+                    .decision,
+                GateDecision::Queue
+            ),
+            "非直接条目在全局冷却内仍应排队（对照组）"
+        );
+    }
+
+    #[test]
+    fn direct_entry_bypasses_typing_dense() {
+        // 闸①同理：打字密集时直接交互仍当场回应，非直接条目排队
+        let map = BehaviorMap::parse(
+            r#"[[map]]
+on = "ping"
+direct = true
+say = ["在的"]
+
+[[map]]
+on = "foreground_switched"
+say = ["普通评论"]
+"#,
+        );
+        let mut g = GateEngine::new(
+            map.entries.len(),
+            FrequencyTier::Balanced,
+            typing_dense_probes(),
+        );
+        assert!(matches!(
+            g.on_event(&evt(EventKind::Ping), &map).decision,
+            GateDecision::Speak(_)
+        ));
+        assert!(
+            matches!(
+                g.on_event(&evt(EventKind::ForegroundSwitched), &map)
+                    .decision,
+                GateDecision::Queue
+            ),
+            "非直接条目在打字密集期仍应排队（对照组）"
+        );
+    }
+
+    #[test]
+    fn direct_entry_still_respects_mood_gate() {
+        // 闸④心情差（深夜+高负载）：直接交互也降级静默——旁路仅限闸①②
+        let map = BehaviorMap::parse(
+            r#"[[map]]
+on = "ping"
+direct = true
+say = ["在的"]
+"#,
+        );
+        let mut g = GateEngine::new(
+            map.entries.len(),
+            FrequencyTier::Balanced,
+            mood_bad_probes(),
+        );
+        g.feed_cpu_for_test(90.0);
+        let out = g.on_event(&evt(EventKind::Ping), &map);
+        assert!(
+            matches!(out.decision, GateDecision::Drop),
+            "闸④心情差时直接交互也应静默"
+        );
+        assert!(out.react.is_none());
     }
 
     #[test]

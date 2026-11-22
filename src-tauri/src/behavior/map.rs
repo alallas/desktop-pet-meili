@@ -35,6 +35,11 @@ pub struct MapEntry {
     /// 封闭集合（前端 switch 消费）：petted=摸头。加载时未知值告警剥离
     #[serde(default)]
     pub anim: Option<String>,
+    /// 直接交互（用户主动发起：摸头/喂食等）：旁路闸①②（打字密集/全局冷却），
+    /// 仍受闸③④约束。与语音对话通道同原则——用户当面叫她必须当场回应；
+    /// 开口后 mark_spoken 会顺延全局冷却窗口
+    #[serde(default)]
+    pub direct: bool,
 }
 
 /// anim 封闭集合：map.toml 写其他值 = 告警剥离（防止 content 包打错字静默失效）

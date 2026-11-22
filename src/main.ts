@@ -23,6 +23,31 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x000000, 0); // 全透明，桌面透出
 document.body.appendChild(renderer.domElement);
 
+// 渲染后端诊断（#36 排查）：WebGL/WebGPU 实际后端落 debug 日志——
+// 出现 SwiftShader/llvmpipe/Dawn CPU = 软渲染（CPU 烧在光栅化上）；
+// AMD/NVIDIA/Intel + D3D11 = 硬件渲染正常。排查期常驻，产品化可摘。
+{
+  const gl = renderer.getContext();
+  const dbgExt = gl.getExtension("WEBGL_debug_renderer_info");
+  const glRenderer = dbgExt ? String(gl.getParameter(dbgExt.UNMASKED_RENDERER_WEBGL)) : "n/a";
+  let gpuInfo = "webgpu-na";
+  const navGpu = (navigator as { gpu?: { requestAdapter(): Promise<{ info?: { vendor?: string; architecture?: string } } | null> } }).gpu;
+  if (navGpu) {
+    void navGpu
+      .requestAdapter()
+      .then((a) => a?.info ?? null)
+      .then((i) => {
+        gpuInfo = i ? `${i.vendor}/${i.architecture}` : "no-adapter";
+        return commands
+          .debugLog(`[gpu] WebGL=${glRenderer} | WebGPU=${gpuInfo} | dpr=${devicePixelRatio} canvas=${renderer.domElement.width}x${renderer.domElement.height}`)
+          .catch(() => {});
+      })
+      .catch(() => {});
+  } else {
+    void commands.debugLog(`[gpu] WebGL=${glRenderer} | WebGPU=unsupported`).catch(() => {});
+  }
+}
+
 scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 const key = new THREE.DirectionalLight(0xfff2e0, 2.2);
 key.position.set(2, 4, 3);

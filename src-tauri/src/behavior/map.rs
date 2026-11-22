@@ -5,6 +5,8 @@
 //! - 单条格式错误（on 非封闭事件名 / say 为空）→ 告警并跳过该条，不影响其他条目
 //! - 台词模板 `{{field}}` 槽位只取事件 payload 的字符串字段；字段缺失则
 //!   该变体不选（换下一条）。v1 不做 mood 类虚拟槽（2026-11-21 定案）
+//! - anim 小动作（M1-6 落地）：随评论的 ReplyReady payload 下发前端驱动反应，
+//!   封闭集合见 KNOWN_ANIMS，未知值加载期告警剥离
 
 use serde::Deserialize;
 
@@ -29,7 +31,14 @@ pub struct MapEntry {
     pub cooldown_min: u64,
     /// 台词变体（至少一条，随机一条出口）
     pub say: Vec<String>,
+    /// 表现层小动作（M1-6 落地）：随 ReplyReady payload 下发前端驱动反应。
+    /// 封闭集合（前端 switch 消费）：petted=摸头。加载时未知值告警剥离
+    #[serde(default)]
+    pub anim: Option<String>,
 }
+
+/// anim 封闭集合：map.toml 写其他值 = 告警剥离（防止 content 包打错字静默失效）
+const KNOWN_ANIMS: [&str; 1] = ["petted"];
 
 fn default_priority() -> u8 {
     1
@@ -86,9 +95,18 @@ impl BehaviorMap {
 
     fn validate(entries: Vec<MapEntry>) -> Self {
         let mut valid = Vec::new();
-        for e in entries {
+        for mut e in entries {
             match EventKind::from_name(&e.on) {
-                Some(kind) if !e.say.is_empty() => valid.push((kind, e)),
+                Some(kind) if !e.say.is_empty() => {
+                    // anim 封闭集合校验：未知值告警剥离（写错字不应静默丢动作）
+                    if let Some(a) = &e.anim {
+                        if !KNOWN_ANIMS.contains(&a.as_str()) {
+                            tracing::warn!(on = %e.on, anim = %a, "未知 anim，剥离");
+                            e.anim = None;
+                        }
+                    }
+                    valid.push((kind, e));
+                }
                 Some(_) => tracing::warn!(on = %e.on, "映射条目 say 为空，跳过"),
                 None => tracing::warn!(on = %e.on, "映射条目 on 非封闭事件名，跳过"),
             }
@@ -289,7 +307,11 @@ say = ["x"]
             ("network_changed", serde_json::json!({"connected": true})),
             (
                 "mouse_clicked",
-                serde_json::json!({"button": "left", "x": 960, "y": 540}),
+                serde_json::json!({"button": "left", "x": 960, "y": 540, "on_pet": false}),
+            ),
+            (
+                "mouse_clicked",
+                serde_json::json!({"button": "left", "x": 960, "y": 540, "on_pet": true}),
             ),
         ];
         let m = BehaviorMap::load("meili");
@@ -313,6 +335,24 @@ say = ["x"]
             });
             assert!(fillable, "场景 {name} {payload} 的匹配条目无可填台词变体");
         }
+    }
+
+    #[test]
+    fn anim_closed_set_unknown_stripped() {
+        let m = BehaviorMap::parse(
+            r#"[[map]]
+on = "booted"
+anim = "petted"
+say = ["x"]
+
+[[map]]
+on = "booted"
+anim = "bogus_anim"
+say = ["y"]
+"#,
+        );
+        assert_eq!(m.entries[0].1.anim.as_deref(), Some("petted"));
+        assert_eq!(m.entries[1].1.anim, None, "未知 anim 应被剥离");
     }
 
     #[test]

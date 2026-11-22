@@ -74,12 +74,20 @@ unsafe extern "system" fn callback(ncode: i32, wparam: WPARAM, lparam: LPARAM) -
         };
         if let Some(button) = button {
             let info = &*(lparam as *const Msllhookstruct);
-            if let Some(bus) = BUS.get() {
-                bus.publish(bus.event(
-                    EventSource::Mouse,
-                    EventKind::MouseClicked,
-                    serde_json::json!({ "button": button, "x": info.pt_x, "y": info.pt_y }),
-                ));
+            let on_pet = crate::window_drag::is_on_pet(info.pt_x, info.pt_y);
+            // 落在宠物上的**左键** deferred：按下即发会把"拎起拖动"误报成
+            // 点击（拖线程松手时才裁决，moved=false 才由 window_drag 补发
+            // on_pet=true 点击）。右键/中键无拖拽语义，按下即发；
+            // 宠物外的左键点击（全局点击统计）也按下即发
+            let deferred = button == "left" && on_pet;
+            if !deferred {
+                if let Some(bus) = BUS.get() {
+                    bus.publish(bus.event(
+                        EventSource::Mouse,
+                        EventKind::MouseClicked,
+                        serde_json::json!({ "button": button, "x": info.pt_x, "y": info.pt_y, "on_pet": on_pet }),
+                    ));
+                }
             }
         }
     }

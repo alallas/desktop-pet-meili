@@ -83,10 +83,21 @@ export type EventKind =
  *  TTS 播放结束（自然播完或被唤醒打断）。payload: {barge_in}
  *  前端消费：收嘴、退出说话动画（M1-3.5b）
  */
-"SpeakEnded";
+"SpeakEnded" | 
+/**
+ *  表现层小动作（行为引擎 map.toml anim 字段的即时下发，M1-6）。
+ *  与台词解耦：直接交互的触感反馈（如摸头跳一下）不等语音管线。
+ *  payload: {anim}，闭集见 map.rs KNOWN_ANIMS（petted=摸头）
+ */
+"Gesture";
 
 /**  事件来源（封闭集；每个采集器一个变体，新增须同步映射表与文档） */
-export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Media" | "Voice" | "Test";
+export type EventSource = "System" | "ForegroundWindow" | "WindowTrack" | "Idle" | "Mouse" | "Power" | "Network" | "Session" | "Media" | "Voice" | 
+/**
+ *  行为引擎自身产出（表现层小动作 Gesture）。引擎对自己的输出不再反应
+ *  （防自激，同 Voice/Test 在 behavior 侧被跳过）
+ */
+"Behavior" | "Test";
 
 /**  事件总线对外流（Rust→WebView，事件监视器调试页订阅） */
 export type EventStream = StdEvent;

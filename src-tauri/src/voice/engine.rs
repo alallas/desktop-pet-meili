@@ -440,7 +440,8 @@ fn consume(
                 ensure_player(player);
                 match speak_reply(tts.as_deref(), player.as_mut(), &text) {
                     Ok(()) => {
-                        // 复用 ReplyReady 让前端/调试页看到台词文本（M1-6 气泡 UI 吃同一事件）
+                        // 复用 ReplyReady 让前端/调试页看到台词文本（M1-6 气泡 UI 吃同一事件）。
+                        // 表现层小动作不随此通道（走 Gesture 事件直发，见 behavior/mod.rs）
                         publish_reply(&bus, &text, 0);
                         tracing::info!("behavior comment speaking");
                         state = State::Speaking;

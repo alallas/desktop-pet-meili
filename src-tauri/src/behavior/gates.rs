@@ -59,7 +59,7 @@ const CPU_HIGH_PERCENT: f64 = 80.0;
 /// CPU 滑窗：5s 一个样本（采样节拍由行为引擎主循环定），10min 窗口 = 120 个
 const CPU_WINDOW_SAMPLES: usize = 120;
 
-/// 闸内决定
+/// 闸内决定（台词去向）
 pub enum GateDecision {
     /// 现在就说（文本已填好槽位）
     Speak(String),
@@ -67,6 +67,16 @@ pub enum GateDecision {
     Queue,
     /// 沉淀/静默（不产出台词）
     Drop,
+}
+
+/// 闸判定结果 = 台词去向 + 即时表现层反应（解耦）。
+/// react（map.toml anim 字段）是**直接交互的触感反馈**（如摸头跳一下）：
+/// 必须即时，不能被全局冷却/排队/打字闸拦住——那只拦"说话"。
+/// 时效边界：条目冷却（防连点刷屏）仍生效；闸④心情差（深夜+高负载）
+/// 时反应一并静默（§41 定案：那种时刻她什么都不做）。
+pub struct GateOutcome {
+    pub decision: GateDecision,
+    pub react: Option<String>,
 }
 
 /// 排队中的一句台词
@@ -162,39 +172,63 @@ impl GateEngine {
 
     /// 事件入口：逐闸判定。每道闸的判定留 info 级日志——场景模拟器测试期的
     /// 排障刚需（"她为什么没说话"必须能从日志直接读到闸门结论）
-    pub fn on_event(&mut self, event: &StdEvent, map: &BehaviorMap) -> GateDecision {
+    pub fn on_event(&mut self, event: &StdEvent, map: &BehaviorMap) -> GateOutcome {
         let Some((idx, entry)) = map.find(event, |i| self.entry_cooldown_done(i)) else {
             // 无匹配 / 条目冷却中：正常沉默（两者同一出口，payload 条件不满足也走这里）
             tracing::info!(kind = ?event.kind, "gate: drop (no match / entry cooldown)");
-            return GateDecision::Drop;
+            return GateOutcome {
+                decision: GateDecision::Drop,
+                react: None,
+            };
         };
         // 闸③内容门槛（P2 永远沉淀；沉默档全沉淀）
         if entry.priority >= self.tier.priority_floor() {
             tracing::info!(kind = ?event.kind, priority = entry.priority, "gate③: priority floor drop");
-            return GateDecision::Drop;
+            return GateOutcome {
+                decision: GateDecision::Drop,
+                react: None,
+            };
         }
-        // 台词：变体轮换，取第一条槽位可填的
-        let Some(text) = self.fill_any_variant(entry, &event.payload) else {
-            tracing::info!(kind = ?event.kind, "gate: drop (no fillable variant / missing slot)");
-            return GateDecision::Drop;
-        };
         // 闸④心情差：降级静默小动作（v1 静默；动作待 M1-6）
         if self.mood_bad() {
             tracing::info!(kind = ?event.kind, priority = entry.priority, "gate④ mood bad, silent gesture");
-            return GateDecision::Drop;
+            return GateOutcome {
+                decision: GateDecision::Drop,
+                react: None,
+            };
         }
+        // 即时反应在台词闸之前摘取：直接交互的触感反馈（anim）即时下发，
+        // 台词继续走闸①②——两者解耦（闸拦"说话"不拦"跳一下"）
+        let react = entry.anim.clone();
+        // 台词：变体轮换，取第一条槽位可填的
+        let Some(text) = self.fill_any_variant(entry, &event.payload) else {
+            tracing::info!(kind = ?event.kind, "gate: drop (no fillable variant / missing slot)");
+            return GateOutcome {
+                decision: GateDecision::Drop,
+                react,
+            };
+        };
         // 闸①打字密集：非 P0 排队（P0 极重要放行）
         if entry.priority > 0 && (self.probes.typing_dense)() {
             tracing::info!(kind = ?event.kind, "gate① typing dense → queue");
-            return self.enqueue(text, entry.priority);
+            return GateOutcome {
+                decision: self.enqueue(text, entry),
+                react,
+            };
         }
         // 闸②全局冷却：排队
         if !self.global_cooldown_done() {
             tracing::info!(kind = ?event.kind, "gate② global cooldown → queue");
-            return self.enqueue(text, entry.priority);
+            return GateOutcome {
+                decision: self.enqueue(text, entry),
+                react,
+            };
         }
         self.mark_spoken(idx, entry);
-        GateDecision::Speak(text)
+        GateOutcome {
+            decision: GateDecision::Speak(text),
+            react,
+        }
     }
 
     /// 队列释放检查（每轮主循环调用）：冷却过、心情好、不在打字 → 挑最重要一条
@@ -240,7 +274,7 @@ impl GateEngine {
             .find_map(|t| fill_template(t, payload))
     }
 
-    fn enqueue(&mut self, text: String, priority: u8) -> GateDecision {
+    fn enqueue(&mut self, text: String, entry: &MapEntry) -> GateDecision {
         if self.queue.len() >= QUEUE_CAP {
             // 满员：新条目优先级必须低于队中最高才可能挤入——挤掉最低最老的；
             // 不更低则沉淀
@@ -253,14 +287,14 @@ impl GateEngine {
             else {
                 return GateDecision::Drop;
             };
-            if priority >= self.queue[max_idx].priority {
+            if entry.priority >= self.queue[max_idx].priority {
                 return GateDecision::Drop;
             }
             self.queue.remove(max_idx);
         }
         self.queue.push_back(Queued {
             text,
-            priority,
+            priority: entry.priority,
             since: Instant::now(),
         });
         GateDecision::Queue
@@ -340,11 +374,37 @@ mod tests {
         }
     }
 
+    impl GateEngine {
+        /// 灌 CPU 滑窗样本到可判定窗口（闸④的"持续高负载"单测等不起 10min）
+        fn feed_cpu_for_test(&mut self, pct: f64) {
+            self.cpu.samples.clear();
+            for _ in 0..CPU_WINDOW_SAMPLES / 2 {
+                self.cpu.samples.push_back(pct);
+            }
+        }
+    }
+
     /// 无环境阻碍的探针（测试默认）：不打字密集、不是深夜
     fn clear_probes() -> Probes {
         Probes {
             typing_dense: || false,
             late_night: || false,
+        }
+    }
+
+    /// 打字密集探针（闸①恒真）
+    fn typing_dense_probes() -> Probes {
+        Probes {
+            typing_dense: || true,
+            late_night: || false,
+        }
+    }
+
+    /// 心情差探针（闸④恒真：深夜+高负载在 mood_bad 内合成）
+    fn mood_bad_probes() -> Probes {
+        Probes {
+            typing_dense: || false,
+            late_night: || true,
         }
     }
 
@@ -371,11 +431,11 @@ say = ["在的"]
 "#,
         );
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
-        match g.on_event(&evt(EventKind::Booted), &map) {
+        match g.on_event(&evt(EventKind::Booted), &map).decision {
             GateDecision::Speak(t) => assert_eq!(t, "你好"),
             _ => panic!("首事件应直接放行"),
         }
-        match g.on_event(&evt(EventKind::Ping), &map) {
+        match g.on_event(&evt(EventKind::Ping), &map).decision {
             GateDecision::Queue => {}
             _ => panic!("全局冷却内第二事件应排队"),
         }
@@ -388,11 +448,11 @@ say = ["在的"]
         let map = map_one("你好");
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
         assert!(matches!(
-            g.on_event(&evt(EventKind::Booted), &map),
+            g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Speak(_)
         ));
         assert!(matches!(
-            g.on_event(&evt(EventKind::Booted), &map),
+            g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Drop
         ));
     }
@@ -402,7 +462,7 @@ say = ["在的"]
         let map = map_one("你好");
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Silent, clear_probes());
         assert!(matches!(
-            g.on_event(&evt(EventKind::Booted), &map),
+            g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Drop
         ));
         assert!(g.release_queue().is_none());
@@ -419,7 +479,7 @@ say = ["背景话"]
         );
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
         assert!(matches!(
-            g.on_event(&evt(EventKind::Booted), &map),
+            g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Drop
         ));
     }
@@ -435,9 +495,46 @@ say = ["背景话"]
         );
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Chatty, clear_probes());
         assert!(matches!(
-            g.on_event(&evt(EventKind::Booted), &map),
+            g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Speak(_)
         ));
+    }
+
+    #[test]
+    fn react_decoupled_from_speech_gates() {
+        // 直接交互的触感反馈（anim）不能被闸①②（打字密集/全局冷却）拦住：
+        // 首摸头事件即时反应；台词被闸①排队后，反应照样即时
+        let map = BehaviorMap::parse(
+            r#"[[map]]
+on = "mouse_clicked"
+anim = "petted"
+priority = 1
+cooldown_min = 3
+say = ["摸头"]
+"#,
+        );
+        let mut g = GateEngine::new(
+            map.entries.len(),
+            FrequencyTier::Balanced,
+            typing_dense_probes(),
+        );
+        let click = evt(EventKind::MouseClicked);
+        let first = g.on_event(&click, &map);
+        assert_eq!(first.react.as_deref(), Some("petted"), "摸头应立即反应");
+        assert!(
+            matches!(first.decision, GateDecision::Queue),
+            "打字密集时台词应排队"
+        );
+        // 闸④心情差（深夜+高负载探针）：反应一并静默（§定案）
+        let mut g2 = GateEngine::new(
+            map.entries.len(),
+            FrequencyTier::Balanced,
+            mood_bad_probes(),
+        );
+        g2.feed_cpu_for_test(90.0);
+        g2.reset_cooldowns();
+        let second = g2.on_event(&click, &map);
+        assert_eq!(second.react, None, "心情差时反应也静默");
     }
 
     #[test]
@@ -445,15 +542,18 @@ say = ["背景话"]
         let map = map_one("低");
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
         // 手动灌满低优先级队列（绕过 on_event，直接测队列语义）
+        let low = &map.entries[0].1;
         for _ in 0..3 {
-            assert!(matches!(g.enqueue("低".into(), 1), GateDecision::Queue));
+            assert!(matches!(g.enqueue("低".into(), low), GateDecision::Queue));
         }
         assert!(
-            matches!(g.enqueue("低".into(), 1), GateDecision::Drop),
+            matches!(g.enqueue("低".into(), low), GateDecision::Drop),
             "同优先级满员即沉淀"
         );
+        let mut urgent = low.clone();
+        urgent.priority = 0;
         assert!(
-            matches!(g.enqueue("高优".into(), 0), GateDecision::Queue),
+            matches!(g.enqueue("高优".into(), &urgent), GateDecision::Queue),
             "更高优先级应挤掉队中最低"
         );
     }
@@ -492,16 +592,16 @@ say = ["在的"]
         );
         let mut g = GateEngine::new(map.entries.len(), FrequencyTier::Balanced, clear_probes());
         assert!(matches!(
-            g.on_event(&evt(EventKind::Booted), &map),
+            g.on_event(&evt(EventKind::Booted), &map).decision,
             GateDecision::Speak(_)
         ));
         assert!(matches!(
-            g.on_event(&evt(EventKind::Ping), &map),
+            g.on_event(&evt(EventKind::Ping), &map).decision,
             GateDecision::Queue
         ));
         g.reset_cooldowns();
         assert!(matches!(
-            g.on_event(&evt(EventKind::Ping), &map),
+            g.on_event(&evt(EventKind::Ping), &map).decision,
             GateDecision::Speak(t) if t == "在的"
         ));
         assert!(g.release_queue().is_none(), "重置应连待讲队列一起清掉");

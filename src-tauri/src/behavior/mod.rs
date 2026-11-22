@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::event_bus::EventBus;
-use crate::ipc::EventSource;
+use crate::ipc::{EventKind, EventSource};
 
 use gates as gates_mod;
 use gates::{FrequencyTier, GateDecision, GateEngine};
@@ -66,10 +66,26 @@ pub fn start(
             }
             match rx.recv_timeout(CONTROL_POLL) {
                 Ok(event) => {
-                    if matches!(event.source, EventSource::Voice | EventSource::Test) {
+                    // Voice/Test 外的 Behavior 源也跳过：不对自己产出的
+                    // Gesture 再反应（防自激回路）
+                    if matches!(
+                        event.source,
+                        EventSource::Voice | EventSource::Test | EventSource::Behavior
+                    ) {
                         continue;
                     }
-                    if let GateDecision::Speak(text) = gates.on_event(&event, &behavior_map) {
+                    let outcome = gates.on_event(&event, &behavior_map);
+                    // 即时表现层反应（摸头等）：与台词解耦，直接总线直发前端
+                    if let Some(anim) = outcome.react {
+                        let mut e = bus.event(
+                            EventSource::Behavior,
+                            EventKind::Gesture,
+                            serde_json::json!({ "anim": anim }),
+                        );
+                        e.privacy_tier = crate::ipc::PrivacyTier::Minimal;
+                        bus.publish(e);
+                    }
+                    if let GateDecision::Speak(text) = outcome.decision {
                         send_comment(&comment_tx, text);
                     }
                 }

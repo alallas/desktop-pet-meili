@@ -17,8 +17,10 @@
 //! - 松手一律恢复穿透 ON——模拟器面板开着时穿透本来也是关的，那时不会拖
 //!   宠物（用户在点面板），冲突场景可忽略；若未来出现"面板开着拖宠物"，
 //!   需要穿透状态权威化（记待办）；
-//! - 点击宠物（按下即松、无位移）v1 无互动语义，只当一次微型拖动（窗口不动），
-//!   点击互动（摸摸头/喂食）归 M1-6 行为层。
+//! - 点击宠物（按下即松、无位移）≠ 拖动：松手时由拖线程裁决——没拖动就
+//!   发 deferred 点击事件（on_pet=true），mouse.rs 对落在宠物上的左键按下
+//!   是 deferred 的（不发全局点击），"拖一下误触发点击评论"在此根治。
+//!   摸头反应 = map.toml anim 字段（M1-6 表现层）
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -51,6 +53,8 @@ static HIT_RECT: [AtomicI32; 4] = [
     AtomicI32::new(0),
 ];
 static HIT_READY: AtomicBool = AtomicBool::new(false);
+/// 事件总线（松手裁决"点击 vs 拖拽"后发 deferred 点击用；start 时注入）
+static BUS: OnceLock<crate::event_bus::EventBus> = OnceLock::new();
 
 /// SWP_* 常量（winuser.h 稳定值；同 win_event.rs 的本地定义约定，避免 import 漂移）
 const SWP_NOSIZE: u32 = 0x0001;
@@ -61,14 +65,16 @@ const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 /// SPI_GETWORKAREA（winuser.h 稳定值）：主显示器工作区（任务栏避让）
 const SPI_GETWORKAREA: u32 = 48;
 
-/// 启动拖线程。win 由装配层（main.rs setup）注入。
-pub fn start(win: &WebviewWindow) {
+/// 启动拖线程。win 与事件总线由装配层（main.rs setup）注入
+/// （总线用于松手裁决"点击 vs 拖拽"后发 deferred 点击事件）。
+pub fn start(win: &WebviewWindow, bus: crate::event_bus::EventBus) {
     let hwnd = win.hwnd().map(|h| h.0 as isize).unwrap_or(0);
     if hwnd == 0 {
         tracing::error!("window_drag: main hwnd unavailable, drag disabled");
         return;
     }
     let _ = SELF_HWND.set(hwnd);
+    let _ = BUS.set(bus);
     // 点击不偷焦点：拖拽按下会落到自家 WebView（穿透摘除后），没这个位会
     // 把窗口激活到前台、打断用户正在用的应用。与 M0 set_ignore_cursor_events
     // 互不冲突——穿透位由 on_left_button_down/drag_once 成对管理
@@ -124,6 +130,15 @@ pub fn set_hit_rect(scale: f64, x: f64, y: f64, w: f64, h: f64) {
     HIT_RECT[2].store((w * s).round() as i32, Ordering::Relaxed);
     HIT_RECT[3].store((h * s).round() as i32, Ordering::Relaxed);
     HIT_READY.store(true, Ordering::Relaxed);
+}
+
+/// 光标是否落在宠物命中矩形内（屏幕物理像素）。mouse.rs 发布点击事件时
+/// 给 payload 标 on_pet 用；未就绪（前端还没报 bbox）时恒 false。
+pub fn is_on_pet(x: i32, y: i32) -> bool {
+    let Some(&hwnd_isize) = SELF_HWND.get() else {
+        return false;
+    };
+    hit_test(hwnd_isize as HWND, x, y)
 }
 
 /// 点 (x,y)（屏幕物理像素）是否落在宠物命中矩形内。
@@ -218,6 +233,19 @@ fn drag_once(hwnd: HWND, x: i32, y: i32) {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, -20, style | 0x20);
     }
     tracing::info!(moved, "pet drag ended");
+
+    // 松手裁决：没拖动 = 点宠物（摸头）。按下时mouse.rs 对"落在宠物上的
+    // 左键"是 deferred 的（不发全局点击），由这里补发——拖到一半松手
+    // （moved=true）不发，§41"拖一下触发评论"噪音在此根治
+    if !moved {
+        if let Some(bus) = BUS.get() {
+            bus.publish(bus.event(
+                crate::ipc::EventSource::Mouse,
+                crate::ipc::EventKind::MouseClicked,
+                serde_json::json!({ "button": "left", "x": x, "y": y, "on_pet": true }),
+            ));
+        }
+    }
 }
 
 /// 便捷入口（main.rs 初始定位用）：窗口所在主显示器工作区；取不到返回 None，

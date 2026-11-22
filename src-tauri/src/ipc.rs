@@ -31,6 +31,9 @@ pub enum EventSource {
     Session,          // 会话状态（WTS 锁屏/解锁事件）
     Media,            // SMTC 媒体会话（WinRT，"你在听/看什么"双通道之一）
     Voice,            // 语音管线（本地 KWS/VAD 处理，唤醒事件本体不外流）
+    /// 行为引擎自身产出（表现层小动作 Gesture）。引擎对自己的输出不再反应
+    /// （防自激，同 Voice/Test 在 behavior 侧被跳过）
+    Behavior,
     Test,
 }
 
@@ -71,6 +74,10 @@ pub enum EventKind {
     /// TTS 播放结束（自然播完或被唤醒打断）。payload: {barge_in}
     /// 前端消费：收嘴、退出说话动画（M1-3.5b）
     SpeakEnded,
+    /// 表现层小动作（行为引擎 map.toml anim 字段的即时下发，M1-6）。
+    /// 与台词解耦：直接交互的触感反馈（如摸头跳一下）不等语音管线。
+    /// payload: {anim}，闭集见 map.rs KNOWN_ANIMS（petted=摸头）
+    Gesture,
 }
 
 impl EventKind {
@@ -96,6 +103,7 @@ impl EventKind {
             EventKind::TranscriptReady => "transcript_ready",
             EventKind::ReplyReady => "reply_ready",
             EventKind::SpeakEnded => "speak_ended",
+            EventKind::Gesture => "gesture",
         }
     }
 
@@ -119,6 +127,7 @@ impl EventKind {
             "transcript_ready" => TranscriptReady,
             "reply_ready" => ReplyReady,
             "speak_ended" => SpeakEnded,
+            "gesture" => Gesture,
             _ => return None,
         })
     }

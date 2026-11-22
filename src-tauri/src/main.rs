@@ -108,8 +108,6 @@ fn main() {
             }
             // M0 验证：默认点击穿透，悬浮层不阻塞桌面操作
             let _ = win.set_ignore_cursor_events(true);
-            // 小窗交互：按住宠物 = 拎起拖窗口（穿透下借 WH_MOUSE_LL 实现，见模块注释）
-            window_drag::start(&win);
             // M1-1：存档库（八张表，架构 §3.8；目录为 %APPDATA%/<identifier>/saves/）
             let save_dir = app.path().app_data_dir()?.join("saves");
             std::fs::create_dir_all(&save_dir).expect("create save dir");
@@ -120,6 +118,9 @@ fn main() {
             // M1-5 修正：总线单实例注入（与语音/行为引擎同一份），事件总线注释见 event_bus.rs
             let bus = crate::event_bus::EventBus::new(app.handle().clone());
             event_collector::start_all(app.handle().clone(), bus.clone());
+            // 小窗交互：按住宠物 = 拎起拖窗口（穿透下借 WH_MOUSE_LL 实现，见模块注释）。
+            // 依赖总线（松手裁决点击 vs 拖拽后发 deferred 点击事件），放总线之后
+            window_drag::start(&win, bus.clone());
             // 总线与行为引擎控制通道挂 State：场景模拟器调试命令（debug_emit_event /
             // debug_reset_behavior）经 tauri::State 取用
             app.manage(bus.clone());

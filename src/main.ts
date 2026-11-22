@@ -268,6 +268,16 @@ function wakeCue() {
     .catch(() => {});
 }
 
+// ---------- 表现层小动作（map.toml anim 字段；M1-6） ----------
+// 闭集消费：未知值忽略。占位模型动画表现力不足（见 wakeCue 注释），
+// v1 反应一律"跳跃 + 注视"——摸头（petted）等正式动画随 meili 形象（#16）。
+const KNOWN_REACTIONS = new Set(["petted"]);
+function playReaction(anim: string) {
+  if (!KNOWN_REACTIONS.has(anim)) return;
+  hopStart = performance.now();
+  lookAtUser(2500);
+}
+
 void events.eventStream.listen((e) => {
   const s = e.payload;
   if (s.kind === "WakeWord") {
@@ -281,6 +291,10 @@ void events.eventStream.listen((e) => {
       speechText = text;
       speechUntil = performance.now() + estimateSpeechMs(text);
     }
+  } else if (s.kind === "Gesture") {
+    // 表现层小动作（map.toml anim）：与台词解耦的即时反馈（摸头等）
+    const anim = (s.payload as { anim?: string }).anim;
+    if (anim) playReaction(anim);
   } else if (s.kind === "SpeakEnded") {
     speechUntil = 0; // 播完或被唤醒打断（barge-in）
   }
@@ -571,7 +585,8 @@ const SCENARIOS: { label: string; kind: string; payload: Value }[] = [
   { label: "拔掉电源", kind: "power_state_changed", payload: { ac_online: false, charging: false, battery_percent: 41 } },
   { label: "断网", kind: "network_changed", payload: { connected: false } },
   { label: "网络恢复", kind: "network_changed", payload: { connected: true } },
-  { label: "鼠标点击", kind: "mouse_clicked", payload: { button: "left", x: 960, y: 540 } },
+  { label: "点外面", kind: "mouse_clicked", payload: { button: "left", x: 960, y: 540, on_pet: false } },
+  { label: "摸头", kind: "mouse_clicked", payload: { button: "left", x: 960, y: 540, on_pet: true } },
 ];
 
 const simPanel = document.createElement("div");

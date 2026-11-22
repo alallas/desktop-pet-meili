@@ -59,6 +59,13 @@ impl Collector for MouseCollector {
 
 unsafe extern "system" fn callback(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode >= 0 {
+        // 小窗形态"拎起=拖窗口"：左键按下落在宠物窗内时 window_drag 摘穿透
+        // （本条按下随后落在自家窗口，不穿透到下层——VS Code 之类不会拖选文本）。
+        // fire-and-forget，正常事件流继续。
+        if wparam as u32 == WM_LBUTTONDOWN {
+            let info = &*(lparam as *const Msllhookstruct);
+            crate::window_drag::on_left_button_down(info.pt_x, info.pt_y);
+        }
         let button = match wparam as u32 {
             WM_LBUTTONDOWN => Some("left"),
             WM_RBUTTONDOWN => Some("right"),

@@ -1,0 +1,229 @@
+//! 拎起 = 拖窗口（小窗主交互，M1-6 窗口管理先遣）。
+//!
+//! 交互语义：小窗默认穿透 ON（不挡桌面），用户**按住宠物 = 拎起拖动**。
+//! 穿透窗口收不到鼠标消息——拖动借 WH_MOUSE_LL 实现：mouse.rs 的钩子回调在
+//! 系统投递消息**之前**触发，左键按下落在窗内时本模块**同步摘掉 WS_EX_TRANSPARENT**
+//! （不吞消息——穿透摘掉后系统对本条按下重新做命中测试会落在自家窗口，
+//! 若吞掉按下则输入管线不登记按键状态，GetAsyncKeyState 永远查不到按下、
+//! 拖动立即失效，2026-11-22 实测踩过）。
+//! 拖动循环由本线程 GetCursorPos + SetWindowPos 跟随光标推进，松手恢复穿透。
+//!
+//! 分工边界：mouse.rs 只翻译事件（采集器职责），"按下落在宠物窗内怎么办"
+//! 是本模块的业务判断——由 [`on_left_button_down`] 承担。
+//!
+//! 已知折衷（v1）：
+//! - 整窗可拖（300×460 内任意点），"只按宠物不透明像素才拖"的 hit rect 细化
+//!   记 §11 待办（前端上报 bbox 投影，按物种调整）；
+//! - 松手一律恢复穿透 ON——模拟器面板开着时穿透本来也是关的，那时不会拖
+//!   宠物（用户在点面板），冲突场景可忽略；若未来出现"面板开着拖宠物"，
+//!   需要穿透状态权威化（记待办）；
+//! - 点击宠物（按下即松、无位移）v1 无互动语义，只当一次微型拖动（窗口不动），
+//!   点击互动（摸摸头/喂食）归 M1-6 行为层。
+
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use tauri::WebviewWindow;
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, SetWindowPos, SystemParametersInfoW,
+};
+
+/// WH_MOUSE_LL 回调（mouse.rs）→ 拖线程的通知通道。容量 4：人手连续点击
+/// 不可能堆 4 条；满则丢（拖线程正忙着拖，来了新按下也处理不了）。
+static DOWN_TX: OnceLock<SyncSender<(i32, i32)>> = OnceLock::new();
+/// 主窗 HWND 缓存（start 时写入）。WH_MOUSE_LL 回调里要用，不能带锁。
+/// 存 isize：裸 HWND(*mut c_void) 不实现 Send/Sync，static 存不了。
+static SELF_HWND: OnceLock<isize> = OnceLock::new();
+
+/// SWP_* 常量（winuser.h 稳定值；同 win_event.rs 的本地定义约定，避免 import 漂移）
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+/// WS_EX_NOACTIVATE（winuser.h 稳定值）：点击窗口不激活、不偷前台焦点
+const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+/// SPI_GETWORKAREA（winuser.h 稳定值）：主显示器工作区（任务栏避让）
+const SPI_GETWORKAREA: u32 = 48;
+
+/// 启动拖线程。win 由装配层（main.rs setup）注入。
+pub fn start(win: &WebviewWindow) {
+    let hwnd = win.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+    if hwnd == 0 {
+        tracing::error!("window_drag: main hwnd unavailable, drag disabled");
+        return;
+    }
+    let _ = SELF_HWND.set(hwnd);
+    // 点击不偷焦点：拖拽按下会落到自家 WebView（穿透摘除后），没这个位会
+    // 把窗口激活到前台、打断用户正在用的应用。与 M0 set_ignore_cursor_events
+    // 互不冲突——穿透位由 on_left_button_down/drag_once 成对管理
+    unsafe {
+        let hwnd = hwnd as HWND;
+        let ex = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, -20);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            hwnd,
+            -20,
+            ex | WS_EX_NOACTIVATE,
+        );
+    }
+    let (tx, rx) = sync_channel::<(i32, i32)>(4);
+    let _ = DOWN_TX.set(tx);
+    thread::spawn(move || {
+        tracing::info!(tid = crate::event_collector::tid(), "window drag thread up");
+        for (x, y) in rx {
+            drag_once(hwnd as HWND, x, y);
+        }
+    });
+}
+
+/// WH_MOUSE_LL 左键按下回调入口：光标在宠物窗内 → 摘掉 WS_EX_TRANSPARENT + 通知
+/// 拖线程。不吞消息——穿透在钩子回调里同步摘除后，系统对这条按下重新做命中
+/// 测试会落在本窗口（后续 move/up/按键状态全部走标准管线，拖线程靠
+/// GetAsyncKeyState 跟手）；若吞掉按下，输入管线不登记按键状态，拖动立即失效
+/// （2026-11-22 实测踩过）。按下落到自家 WebView 无副作用（无点击处理器，
+/// WS_EX_NOACTIVATE 保证不偷焦点）。快速路径 ~µs，符合钩子回调轻量要求。
+pub fn on_left_button_down(x: i32, y: i32) {
+    let Some(&hwnd_isize) = SELF_HWND.get() else {
+        return;
+    };
+    let hwnd = hwnd_isize as HWND;
+    unsafe {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect) == 0 {
+            return;
+        }
+        if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+            return;
+        }
+        let style = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, -20);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, -20, style & !0x20);
+    }
+    if let Some(tx) = DOWN_TX.get() {
+        let _ = tx.try_send((x, y)); // 满则丢：拖线程正忙，无法并发拖第二轮
+    }
+}
+
+/// 一轮拖动：从按下点开始跟随光标，直到左键松开。
+fn drag_once(hwnd: HWND, x: i32, y: i32) {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe {
+        if windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect) == 0 {
+            return;
+        }
+    }
+    let grab_dx = x - rect.left;
+    let grab_dy = y - rect.top;
+    let work = work_area();
+    let start = Instant::now();
+    let mut moved = false;
+    let mut last_pos = (rect.left, rect.top);
+
+    // 跟手节拍 16ms（~60Hz，与 M0 窗口移动实测的帧预算一致）；松手检测用
+    // GetAsyncKeyState 而非等 WM_LBUTTONUP——拖动中窗口不一定收得到消息
+    loop {
+        thread::sleep(Duration::from_millis(16));
+        unsafe {
+            if GetAsyncKeyState(0x01) as u32 & 0x8000 == 0 {
+                break; // VK_LBUTTON 松开
+            }
+            let mut pt = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut pt) == 0 {
+                break;
+            }
+            // 防抖：按下后 250ms 内位移 < 6px 视为"没打算拖"，窗口不动
+            let dx = pt.x - x;
+            let dy = pt.y - y;
+            if !moved && dx * dx + dy * dy < 36 && start.elapsed() < Duration::from_millis(250) {
+                continue;
+            }
+            let mut new_left = pt.x - grab_dx;
+            let mut new_top = pt.y - grab_dy;
+            let win_w = rect.right - rect.left;
+            let win_h = rect.bottom - rect.top;
+            clamp_to_work_area(&mut new_left, &mut new_top, win_w, win_h, &work);
+            if (new_left, new_top) == last_pos {
+                continue;
+            }
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                new_left,
+                new_top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            last_pos = (new_left, new_top);
+            moved = true;
+        }
+    }
+
+    // 恢复穿透 ON（小窗常态）：WS_EX_TRANSPARENT 位加回（见 on_left_button_down
+    // 的对称注释）。移动会触发自窗口 LOCATIONCHANGE → 现有 SelfWindowMoved
+    // 事件链路，位置同步不用本模块操心
+    unsafe {
+        let style = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, -20);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, -20, style | 0x20);
+    }
+    tracing::info!(moved, "pet drag ended");
+}
+
+/// 便捷入口（main.rs 初始定位用）：窗口所在主显示器工作区；取不到返回 None，
+/// 调用方退回全屏尺寸（不避让任务栏，比不定位强）。
+pub fn work_area_for(win: &WebviewWindow) -> Option<RECT> {
+    win.hwnd().ok()?;
+    let r = work_area();
+    if r.right <= r.left || r.bottom <= r.top {
+        None
+    } else {
+        Some(r)
+    }
+}
+
+/// 主显示器工作区（任务栏避让）。坐标与 GetWindowRect（物理像素）同空间，
+/// 可直接比较/夹取。单显示器假设与 main.rs 初始定位一致，
+/// 多显示器随 M1-6 窗口管理细化。
+fn work_area() -> RECT {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe {
+        // 不用 SystemParametersInfoForDpi：它对 SPI_GETWORKAREA 实测返回失败
+        // （ok=0，2026-11-22 用 ctypes 对照验证）。本进程是 per-monitor DPI 感知
+        // （GetWindowRect 实测物理像素），SystemParametersInfoW 对感知进程直接
+        // 返回主显示器工作区物理坐标，与 GetWindowRect 同空间，可直接比较
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut RECT as *mut _, 0);
+    }
+    rect
+}
+
+/// 窗口位置夹取进工作区（拖出不脱屏、右下不扎进任务栏）
+fn clamp_to_work_area(left: &mut i32, top: &mut i32, win_w: i32, win_h: i32, work: &RECT) {
+    if *left < work.left {
+        *left = work.left;
+    }
+    if *top < work.top {
+        *top = work.top;
+    }
+    if *left + win_w > work.right {
+        *left = work.right - win_w;
+    }
+    if *top + win_h > work.bottom {
+        *top = work.bottom - win_h;
+    }
+}

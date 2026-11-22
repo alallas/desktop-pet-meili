@@ -15,6 +15,7 @@ mod llm;
 mod perception;
 mod settings;
 mod voice;
+mod window_drag;
 
 use tauri::Manager;
 use tauri_specta::Event as _; // Booted::emit trait 方法
@@ -80,18 +81,25 @@ fn main() {
     tauri::Builder::default()
         .setup(move |app| {
             let win = app.get_webview_window("main").unwrap();
-            // 小窗形态（§3.5 M1-1 定案）：主窗 = 300×400 透明小窗（tauri.conf），
-            // 不再铺满屏幕。初始定位主显示器右下角（不挡工作区）；
-            // 任务栏避让/多显示器/拖拽跟随随 M1-6 窗口管理细化
+            // 小窗形态（§3.5 M1-1 定案）：主窗 = 300×460 透明小窗（tauri.conf），
+            // 不再铺满屏幕。初始定位主显示器工作区右下角（不挡工作区，任务栏避让；
+            // 多显示器/拖拽跟随随 M1-6 窗口管理细化）
             if let Ok(Some(monitor)) = app.primary_monitor() {
                 if let Ok(win_size) = win.outer_size() {
+                    // 工作区 = 屏幕减任务栏（SPI_GETWORKAREA，感知进程返回物理
+                    // 像素，与 outer_size 同空间）；取不到退回全屏尺寸
+                    let (_wl, _wt, wr, wb) = match window_drag::work_area_for(&win) {
+                        Some(w) => (w.left, w.top, w.right, w.bottom),
+                        None => (
+                            monitor.position().x,
+                            monitor.position().y,
+                            monitor.position().x + monitor.size().width as i32,
+                            monitor.position().y + monitor.size().height as i32,
+                        ),
+                    };
                     let margin = (24.0 * monitor.scale_factor()) as i32;
-                    let x = monitor.position().x + monitor.size().width as i32
-                        - win_size.width as i32
-                        - margin;
-                    let y = monitor.position().y + monitor.size().height as i32
-                        - win_size.height as i32
-                        - margin;
+                    let x = wr - win_size.width as i32 - margin;
+                    let y = wb - win_size.height as i32 - margin;
                     let _ = win.set_position(tauri::Position::Physical(
                         tauri::PhysicalPosition::new(x, y),
                     ));
@@ -99,6 +107,8 @@ fn main() {
             }
             // M0 验证：默认点击穿透，悬浮层不阻塞桌面操作
             let _ = win.set_ignore_cursor_events(true);
+            // 小窗交互：按住宠物 = 拎起拖窗口（穿透下借 WH_MOUSE_LL 实现，见模块注释）
+            window_drag::start(&win);
             // M1-1：存档库（八张表，架构 §3.8；目录为 %APPDATA%/<identifier>/saves/）
             let save_dir = app.path().app_data_dir()?.join("saves");
             std::fs::create_dir_all(&save_dir).expect("create save dir");

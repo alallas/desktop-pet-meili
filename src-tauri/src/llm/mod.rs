@@ -12,12 +12,32 @@ pub mod sidecar;
 
 use std::collections::VecDeque;
 use std::io::BufRead;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use persona::PersonaSpec;
 use sidecar::Sidecar;
 
 /// 短上下文轮数（每轮 = 用户一句 + 美丽一句）
 const HISTORY_TURNS: usize = 4;
+
+/// #38 定案（2026-11-22）：sidecar 空闲卸载阈值。最后一次使用后超过此时长
+/// 自动卸载（kill 进程、内存归零）；窗口内复用，LLM 评论/对话天然扎堆
+const IDLE_UNLOAD: Duration = Duration::from_secs(15 * 60);
+
+/// 回收线程轮询节拍：60s 一次，粒度远松于 15min 阈值即可
+const REAP_POLL: Duration = Duration::from_secs(60);
+
+/// 空闲卸载判定（纯函数，单测边界用）
+fn should_unload(idle: Duration) -> bool {
+    idle >= IDLE_UNLOAD
+}
+
+/// 锁辅助：任一持锁线程 panic 不拖垮整个进程（回收线程/think 跨线程共享）
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 生成上限：M0 实测美美短回复 10–20 tokens；90 留足余量又不至于失控
 const MAX_TOKENS: u32 = 90;
@@ -26,21 +46,66 @@ const MAX_TOKENS: u32 = 90;
 /// 引擎层没有 persona，兜底话术故意不带口癖——通用优先，避免口癖与档案脱节
 pub const FALLBACK_REPLY: &str = "我刚刚没太听清，你可以再说一遍吗？";
 
-/// 对话思考器：持有 sidecar 生命周期 + 短期记忆。
+/// 对话思考器：sidecar 懒加载生命周期 + 短期记忆。
+///
+/// #38 定案（2026-11-22）：不预载模型——启动少一个 2.4GB sidecar 抢开机时间。
+/// sidecar 首次 think 时才 spawn（~5s 加载摊进非即时场景，用户无感知）；
+/// 后台回收线程按 [`IDLE_UNLOAD`] 空闲阈值自动卸载（kill 进程、内存归零，
+/// 顺带规避 llama-server 长跑内存泄漏）。跨线程共享用 Mutex 而非塞进
+/// 语音引擎线程，回收不依赖引擎心跳。
 pub struct Thinker {
-    _sidecar: Sidecar,
+    sidecar: Arc<Mutex<Option<Sidecar>>>,
+    /// 最后一次 think 完成时刻（回收线程的闲置判定依据）
+    last_used: Arc<Mutex<Instant>>,
     history: VecDeque<(String, String)>,
     /// 人设档案（resources/creatures/<id>.toml；M2 多动物时按当前动物切换）
     persona: PersonaSpec,
 }
 
 impl Thinker {
-    /// 启动本地 Qwen3-4B sidecar 并构造思考器。失败返回 Err（调用方降级）。
-    pub fn start() -> Result<Self, String> {
+    /// 构造思考器：只加载人设，不 spawn sidecar（懒加载）。
+    pub fn new() -> Self {
+        let sidecar = Arc::new(Mutex::new(None));
+        let last_used = Arc::new(Mutex::new(Instant::now()));
+        Self::spawn_reaper(Arc::clone(&sidecar), Arc::clone(&last_used));
+        Self {
+            sidecar,
+            last_used,
+            history: VecDeque::new(),
+            persona: PersonaSpec::load("meili"),
+        }
+    }
+
+    /// 后台回收线程：每 REAP_POLL 检查一次闲置时长，超阈值卸载 sidecar
+    fn spawn_reaper(sidecar: Arc<Mutex<Option<Sidecar>>>, last_used: Arc<Mutex<Instant>>) {
+        thread::spawn(move || loop {
+            thread::sleep(REAP_POLL);
+            let idle = lock(&last_used).elapsed();
+            if !should_unload(idle) {
+                continue;
+            }
+            // take 出即 Drop：kill 子进程，内存归零
+            if lock(&sidecar).take().is_some() {
+                tracing::info!(
+                    idle_min = idle.as_secs() / 60,
+                    "llm sidecar: idle unload (#38, 内存归零；下次对话重新加载)"
+                );
+            }
+        });
+    }
+
+    /// 确保 sidecar 在跑（懒加载入口）：已跑则只刷新使用时间；未跑则
+    /// spawn + 预热（~5s）。spawn 失败返回 Err——调用方兜底话术，链路不致命
+    fn ensure_sidecar(&mut self) -> Result<(), String> {
+        *lock(&self.last_used) = Instant::now();
+        let mut slot = lock(&self.sidecar);
+        if slot.is_some() {
+            return Ok(());
+        }
         let sidecar = Sidecar::spawn()?;
-        // 预热（待办 #23-a）：sidecar /health 就绪 ≠ 推理就绪，首请求有 ~11.5s 冷启动
-        // （待办 #23 实机数据）。启动时同步发一条小请求把冷启动摊进应用加载期。
-        let t0 = std::time::Instant::now();
+        // 预热（待办 #23-a）：/health 就绪 ≠ 推理就绪，首请求有 ~11.5s 冷启动
+        // （待办 #23 实机数据）。懒加载后同步发一条小请求把冷启动摊进本次加载
+        let t0 = Instant::now();
         let warmup =
             Self::chat_static(&serde_json::json!([{"role": "user", "content": "在吗"}]), 8);
         tracing::info!(
@@ -48,15 +113,12 @@ impl Thinker {
             if warmup.is_ok() {
                 "ok"
             } else {
-                "failed (不阻塞，首次对话会慢)"
+                "failed (不阻塞，本次对话会慢)"
             },
             t0.elapsed()
         );
-        Ok(Self {
-            _sidecar: sidecar,
-            history: VecDeque::new(),
-            persona: PersonaSpec::load("meili"),
-        })
+        *slot = Some(sidecar);
+        Ok(())
     }
 
     /// 一轮对话（流式，待办 #23-b）：transcript → 美丽口吻回复。
@@ -68,15 +130,22 @@ impl Thinker {
         transcript: &str,
         mut on_sentence: impl FnMut(&str),
     ) -> Result<String, String> {
+        // 懒加载：首次对话才 spawn sidecar（~5s 摊在这里，用户正等着回话，
+        // 与喊唤醒词等 ASR 的体感同级）
+        self.ensure_sidecar()?;
         let messages = Self::assemble_messages(&self.persona, &self.history, transcript);
         let mut splitter = SentenceSplitter::new();
         let mut reply = String::new();
-        self.chat_stream(&messages, |delta| {
+        let chat_result = self.chat_stream(&messages, |delta| {
             reply.push_str(delta);
             for sentence in splitter.push(delta) {
                 on_sentence(&sentence);
             }
-        })?;
+        });
+        // 收尾刷新使用时间：回收线程据此判定空闲（对话最长 75s << 15min 阈值，
+        // 不会出现回收线程把正在说话的 sidecar 杀掉）
+        *lock(&self.last_used) = Instant::now();
+        chat_result?;
         if let Some(tail) = splitter.flush() {
             on_sentence(&tail);
         }
@@ -245,6 +314,24 @@ impl SentenceSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #38：懒加载——构造 Thinker 不 spawn sidecar（启动不再预载 2.4GB 模型）
+    #[test]
+    fn thinker_new_does_not_spawn_sidecar() {
+        let thinker = Thinker::new();
+        assert!(
+            lock(&thinker.sidecar).is_none(),
+            "懒加载：构造时 sidecar 必须为空"
+        );
+    }
+
+    /// #38：空闲卸载判定的边界（15min 阈值，纯函数）
+    #[test]
+    fn should_unload_boundary() {
+        assert!(!should_unload(Duration::from_secs(14 * 60 + 59)));
+        assert!(should_unload(Duration::from_secs(15 * 60)));
+        assert!(should_unload(Duration::from_secs(60 * 60)));
+    }
 
     /// 人设装配：system 打头、历史成对按序、当前轮收尾、无历史时不留空 assistant
     #[test]

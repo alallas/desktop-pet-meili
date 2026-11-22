@@ -155,14 +155,10 @@ fn run(
     capture.rebuild()?;
     tracing::info!("voice engine: listening for wake word");
 
-    // 思考层（本地 Qwen3-4B sidecar）：启动失败不致命——语音链路照常，只是没回复
-    let mut thinker = match crate::llm::Thinker::start() {
-        Ok(t) => Some(t),
-        Err(e) => {
-            tracing::error!("thinker unavailable, replies disabled: {e:#}");
-            None
-        }
-    };
+    // 思考层（本地 Qwen3-4B sidecar，#38 懒加载+空闲卸载）：构造只加载人设，
+    // sidecar 首次对话才 spawn——启动少一个 2.4GB 模型抢开机时间；
+    // spawn/对话失败在 think 时降级兜底话术，语音链路不致命
+    let mut thinker = Some(crate::llm::Thinker::new());
     // TTS（Kokoro sidecar 合成 + cpal 播放）：启动失败不致命——降级为静默回复
     let tts = match super::tts::TtsSidecar::spawn() {
         Ok(t) => {

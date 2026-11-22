@@ -63,9 +63,10 @@ pub fn start(
     bus: EventBus,
     comments: Receiver<String>,
     behavior_ctrl: SyncSender<crate::behavior::Control>,
+    prewarm_lines: Vec<String>,
 ) {
     thread::spawn(move || {
-        if let Err(e) = run(bus, comments, behavior_ctrl) {
+        if let Err(e) = run(bus, comments, behavior_ctrl, prewarm_lines) {
             tracing::error!("voice engine stopped: {e:#}");
         }
     });
@@ -75,6 +76,7 @@ fn run(
     bus: EventBus,
     comments: Receiver<String>,
     behavior_ctrl: SyncSender<crate::behavior::Control>,
+    prewarm_lines: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model_dir = root.join("../models/kws");
@@ -117,8 +119,13 @@ fn run(
         }
     };
     // TTS（Kokoro sidecar 合成 + cpal 播放）：启动失败不致命——降级为静默回复
-    let mut tts = match super::tts::TtsSidecar::spawn() {
-        Ok(t) => Some(t),
+    let tts = match super::tts::TtsSidecar::spawn() {
+        Ok(t) => {
+            let shared = std::sync::Arc::new(t);
+            // #35：模板台词后台预热（进 sidecar 缓存，行为评论零合成延迟）
+            super::tts::prewarm(std::sync::Arc::clone(&shared), prewarm_lines);
+            Some(shared)
+        }
         Err(e) => {
             tracing::error!("tts sidecar unavailable, silent replies: {e:#}");
             None
@@ -137,7 +144,7 @@ fn run(
         vad: &mut vad,
         asr: &asr,
         thinker: thinker.as_mut(),
-        tts: &mut tts,
+        tts: &tts,
         player: &mut player,
     };
     consume(bus, &mut parts, rx, &mut capture, comments, &behavior_ctrl);
@@ -288,7 +295,7 @@ struct EngineParts<'a> {
     vad: &'a mut Vad,
     asr: &'a Recognizer,
     thinker: Option<&'a mut crate::llm::Thinker>,
-    tts: &'a mut Option<super::tts::TtsSidecar>,
+    tts: &'a Option<super::tts::Shared>,
     player: &'a mut Option<super::player::Player>,
 }
 
@@ -316,7 +323,7 @@ fn consume(
     let vad = &mut *parts.vad;
     let asr = parts.asr;
     let thinker = &mut parts.thinker;
-    let tts = &mut *parts.tts;
+    let tts = parts.tts;
     let player = &mut *parts.player;
     let mut buf = Vec::with_capacity(CHUNK_SAMPLES);
     // VAD 侧对齐缓冲：0.1s 块（1600）非 512 倍数，攒到 4×512 再喂
@@ -365,7 +372,7 @@ fn consume(
         if matches!(state, State::Idle) {
             if let Ok(text) = comments.try_recv() {
                 ensure_player(player);
-                match speak_reply(tts.as_mut(), player.as_mut(), &text) {
+                match speak_reply(tts.as_deref(), player.as_mut(), &text) {
                     Ok(()) => {
                         // 复用 ReplyReady 让前端/调试页看到台词文本（M1-6 气泡 UI 吃同一事件）
                         publish_reply(&bus, &text, 0);
@@ -542,7 +549,8 @@ fn consume(
                                             text = %text,
                                             "tier command matched, intercept before llm"
                                         );
-                                        if speak_reply(tts.as_mut(), player.as_mut(), ack).is_ok() {
+                                        if speak_reply(tts.as_deref(), player.as_mut(), ack).is_ok()
+                                        {
                                             audio_enqueued = true;
                                         }
                                     }
@@ -553,7 +561,7 @@ fn consume(
                                         let think_result =
                                             thinker.think_streaming(&text, |sentence| {
                                                 match speak_reply(
-                                                    tts.as_mut(),
+                                                    tts.as_deref(),
                                                     player.as_mut(),
                                                     sentence,
                                                 ) {
@@ -595,7 +603,7 @@ fn consume(
                                                 let fallback =
                                                     crate::llm::FALLBACK_REPLY.to_string();
                                                 if speak_reply(
-                                                    tts.as_mut(),
+                                                    tts.as_deref(),
                                                     player.as_mut(),
                                                     &fallback,
                                                 )
@@ -615,7 +623,7 @@ fn consume(
                                 // 碎语：出声追问（用户可再喊一次名字重试）；
                                 // 正常：有音频则播完回 IDLE，无音频（合成失败）直接回
                                 state = if !meaningful {
-                                    if speak_reply(tts.as_mut(), player.as_mut(), SHORT_NUDGE)
+                                    if speak_reply(tts.as_deref(), player.as_mut(), SHORT_NUDGE)
                                         .is_ok()
                                     {
                                         State::Speaking
@@ -639,7 +647,8 @@ fn consume(
                             EMPTY_WAKE_SUPPRESS
                         );
                         suppress_until = Some(Instant::now() + EMPTY_WAKE_SUPPRESS);
-                        state = if speak_reply(tts.as_mut(), player.as_mut(), WAKE_NUDGE).is_ok() {
+                        state = if speak_reply(tts.as_deref(), player.as_mut(), WAKE_NUDGE).is_ok()
+                        {
                             State::Speaking
                         } else {
                             State::Idle
@@ -724,7 +733,7 @@ fn ensure_player(player: &mut Option<super::player::Player>) {
 /// 合成 + 播放一句回复（M1-3.5b）。合成阻塞 ~1–3s（与 ASR/LLM 同级，引擎线程
 /// 容忍短暂漏听唤醒）；播放本身非阻塞（队列 + 输出回调，见 player.rs）。
 fn speak_reply(
-    tts: Option<&mut super::tts::TtsSidecar>,
+    tts: Option<&super::tts::TtsSidecar>,
     player: Option<&mut super::player::Player>,
     text: &str,
 ) -> Result<(), String> {

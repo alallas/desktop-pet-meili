@@ -1,8 +1,10 @@
-# 潮间带 M1-3.5b TTS sidecar：Kokoro-82M 中文常驻合成服务
+# 潮间带 M1-3.5b TTS sidecar：Kokoro-82M 中文常驻合成服务（#35 预热缓存版）
 # 协议（行式，单行）：
-#   入：一行文本（不含换行；脚本内会清洗）→ 合成 24kHz 16-bit PCM WAV
-#   出：OK<TAB>wav 绝对路径  或  ERR<TAB>错误信息
+#   入：<seq>\t<文本>（seq 为非负整数，按请求回显；并发安全靠 seq 关联）
+#   出：OK\t<seq>\t<wav 绝对路径>\t<样本数>  或  ERR\t<seq>\t<错误信息>
 # 常驻原因：Kokoro 模型加载 ~2s（坑 16 懒加载补丁），逐句 spawn 不可接受。
+# #35：文本→wav 缓存（dict）——行为评论的 map.toml 变体是有限的，
+# 后台预热后重复/预合成台词零合成延迟；cleanup 只删不在缓存里的文件。
 # 用法: python scripts/tts_sidecar.py
 import sys
 import tempfile
@@ -13,7 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 OUT_DIR = Path(tempfile.gettempdir()) / "chaojiandai-tts"
-KEEP_FILES = 20  # 滚动清理，防 temp 堆积
+CACHE_CAP = 150  # 缓存上限：超出后按插入序驱逐（模板台词 ~30 条 + 会话台词，余量充足）
+
+# 文本 → wav 路径。缓存是"零合成延迟"的核心，cleanup 以它为准。
+CACHE: dict[str, Path] = {}
 
 
 def load_pipeline():
@@ -46,10 +51,24 @@ def synth_to_wav(pipeline, text, path):
 
 
 def cleanup():
-    files = sorted(OUT_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime)
-    for old in files[:-KEEP_FILES]:
+    """只删不在缓存里的 wav（缓存文件可能被正在播放的台词引用，绝不能动）。"""
+    keep = set(CACHE.values())
+    for old in OUT_DIR.glob("*.wav"):
+        if old in keep:
+            continue
         try:
             old.unlink()
+        except OSError:
+            pass
+
+
+def evict_if_needed():
+    """缓存超上限：按插入序驱逐最老的，删其文件。"""
+    while len(CACHE) > CACHE_CAP:
+        oldest_text, oldest_path = next(iter(CACHE.items()))
+        CACHE.pop(oldest_text)
+        try:
+            oldest_path.unlink()
         except OSError:
             pass
 
@@ -62,19 +81,28 @@ def main():
 
     seq = 0
     for line in sys.stdin:
-        text = line.strip().replace("\r", "")
-        if not text:
+        line = line.strip().replace("\r", "")
+        if not line:
             continue
         # 防御：协议单行，清掉所有控制字符（合成器对换行敏感）
-        text = "".join(ch for ch in text if ch >= " " or ch in "\t")
-        text = text.replace("\t", "，")
+        line = "".join(ch for ch in line if ch >= " " or ch in "\t")
+        text = line.replace("\t", "，")
+        if not text:
+            continue
         seq += 1
         path = OUT_DIR / f"tts_{int(time.time())}_{seq}.wav"
         try:
+            cached = CACHE.get(text)
+            if cached is not None and cached.exists():
+                n = cached.stat().st_size // 2  # 样本数≈字节数/2（16-bit 单声道）
+                print(f"OK\t{seq}\t{cached}\t{n}", flush=True)
+                continue
             n = synth_to_wav(pipeline, text, path)
-            print(f"OK\t{path}\t{n}", flush=True)
+            CACHE[text] = path
+            evict_if_needed()
+            print(f"OK\t{seq}\t{path}\t{n}", flush=True)
         except Exception as e:  # noqa: BLE001 —— 协议要求任何失败都回 ERR，不能断流
-            print(f"ERR\t{type(e).__name__}: {e}", flush=True)
+            print(f"ERR\t{seq}\t{type(e).__name__}: {e}", flush=True)
         cleanup()
 
 

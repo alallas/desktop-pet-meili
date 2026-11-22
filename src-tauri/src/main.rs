@@ -107,7 +107,14 @@ fn main() {
             // M1-3.2 + M1-5：语音引擎（常驻线程）+ 行为引擎（事件 → 四道闸 → 台词）。
             // 台词通道：行为引擎产、语音引擎 IDLE 态消费（满员即丢，闸已限频）
             let (comment_tx, comment_rx) = std::sync::mpsc::sync_channel::<String>(8);
-            voice::engine::start(bus.clone(), comment_rx, control_tx.clone());
+            // #35：行为评论模板台词预热——台词全部来自 map.toml 有限变体
+            let prewarm_lines: Vec<String> = behavior::map::BehaviorMap::load("meili")
+                .entries
+                .iter()
+                .flat_map(|(_, e)| e.say.iter().cloned())
+                .filter(|s| !s.contains("{{")) // 槽位台词真实出现时才合成（槽位未填会合成出字面 {{app}}）
+                .collect();
+            voice::engine::start(bus.clone(), comment_rx, control_tx.clone(), prewarm_lines);
             behavior::start(bus.clone(), control_rx, comment_tx);
             // M1-5 场景模拟器：全局热键 Ctrl+Alt+N（主窗口不聚焦，热键只能 Rust 侧注册）
             dev_hotkey::start(app.handle().clone());

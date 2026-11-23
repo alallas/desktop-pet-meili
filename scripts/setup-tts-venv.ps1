@@ -24,6 +24,16 @@ function Pick-BasePython {
 # 1) venv
 if (-not (Test-Path $venvPy)) {
     $base = Pick-BasePython
+    # 坑 53 防护：基底若本身是 venv 里的 python，产物 venv 会链到那个 venv 的
+    # 基底解释器（本机即 Kimi 运行时路径）——不是自包含的。允许但明示。
+    try {
+        $baseIsVenv = Invoke-Expression ("& " + $base + " -c `"import sys; print('yes' if sys.prefix != sys.base_prefix else 'no')`"")
+        if ($baseIsVenv -contains 'yes') {
+            Write-Warning "基底解释器本身是 venv（坑 53）：产物 venv 将链到其基底解释器（本机 = Kimi 运行时路径），非自包含。打包/移植请在目标机用真实 Python 重建。"
+        }
+    } catch {
+        Write-Warning "基底 venv 检测失败（不影响安装，坑 53 提示略过）"
+    }
     Write-Host "创建 venv（基底: $base）→ $venv"
     & $base -m venv $venv
     if (-not (Test-Path $venvPy)) { throw "venv 创建失败" }

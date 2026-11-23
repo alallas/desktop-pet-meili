@@ -182,8 +182,20 @@ impl TtsSidecar {
 
 impl Drop for SidecarInner {
     fn drop(&mut self) {
-        if let Err(e) = self.child.kill() {
-            let _ = writeln!(std::io::stderr(), "tts sidecar kill 失败: {e}");
+        // 杀进程**树**：venv 的 python.exe 是 ~260KB 的重定向壳，真正跑脚本的是
+        // 它派生的基底解释器子进程（实测父 4MB 空转 / 子 1.2GB 装模型，坑 53）——
+        // 只 kill 父会把 1.2GB 的子进程 orphan 掉（历史孤儿 sidecar 的成因）。
+        // taskkill /T 随父杀整棵树；taskkill 恒在（System32），失败回退单杀
+        let pid = self.child.id();
+        let tree_killed = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !tree_killed {
+            if let Err(e) = self.child.kill() {
+                let _ = writeln!(std::io::stderr(), "tts sidecar kill 失败: {e}");
+            }
         }
         let _ = self.child.wait();
     }
@@ -199,10 +211,24 @@ pub fn prewarm(sidecar: Shared, lines: Vec<String>) {
     std::thread::spawn(move || {
         let total = lines.len();
         let t0 = Instant::now();
+        // 两轮：首轮失败（超时）的台词收尾重试一次。失败主因是启动期 CPU
+        // 竞争——预热与 llama-server 加载（16 线程）并发，个别合成被饿超时
+        // （2026-11-22 实证 27/28）；重试发生在 llama 加载完成后，基本必过。
+        // 仍失败的记 warn + 原文——"哪条台词没进缓存"此前不可见
+        let mut failed: Vec<String> = Vec::new();
         let mut ok = 0usize;
         for line in lines {
             if sidecar.synth(&line).is_ok() {
                 ok += 1;
+            } else {
+                failed.push(line);
+            }
+        }
+        for line in failed {
+            if sidecar.synth(&line).is_ok() {
+                ok += 1;
+            } else {
+                tracing::warn!(text = %line, "tts prewarm 重试仍失败（该台词首用时现场合成）");
             }
         }
         tracing::info!(

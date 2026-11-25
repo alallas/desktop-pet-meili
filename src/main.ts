@@ -54,15 +54,25 @@ key.position.set(2, 4, 3);
 scene.add(key);
 
 // ---------- 模型 / 动画状态机 ----------
-// 当前模型：meili 水獭原型（#16 阶段③⑤：Tripo p2-quad 生成 → fbx2glb 转换 →
-// gltf-transform 标准化 14858 三角/无纹理）。尚无骨骼与动画（阶段④ 绑骨后解锁
-// 动作与视线）；Soldier（Mixamo 授权占位）留 public/models/Soldier.glb 可回退。
-type AnimName = "Idle" | "Walk" | "Run" | "TPose";
-const STATE_KEYS: Record<string, AnimName> = { "1": "Idle", "2": "Walk", "3": "Run", "4": "TPose" };
+// 当前模型：meili 水獭原型（#16 阶段③④⑤：Tripo p2-quad 生成 → fbx2glb 转换 →
+// Blender 程序化绑骨+10 clip → gltf-transform 标准化 28193 三角/无纹理）。
+// Soldier（Mixamo 授权占位）留 public/models/Soldier.glb 可回退。
+// clip 命名见 docs/美术生产线.md 附录（Blender NLA track 名原样导出）。
+type AnimName =
+  | "idle_a" | "wave" | "jump" | "sit" | "sleep" | "petted" | "listen"
+  | "special_rub_face" | "special_gift_shell" | "special_explain";
+// 常驻循环 clip；其余为一次性动作（播完自动回 idle_a）
+const LOOPING = new Set<AnimName>(["idle_a", "sleep", "petted", "special_explain"]);
+const STATE_KEYS: Record<string, AnimName> = {
+  "1": "idle_a", "2": "wave", "3": "jump", "4": "sit", "5": "sleep",
+  "6": "petted", "7": "listen", "8": "special_rub_face",
+  "9": "special_gift_shell", "0": "special_explain",
+};
+const STATE_KEYS_INV = new Set<string>(Object.values(STATE_KEYS));
 
 let mixer: THREE.AnimationMixer | null = null;
 const actions = new Map<AnimName, THREE.AnimationAction>();
-let current: AnimName = "Idle";
+let current: AnimName = "idle_a";
 let headBone: THREE.Bone | null = null;
 let bboxInfo = "?";
 let petModel: THREE.Object3D | null = null;
@@ -112,16 +122,25 @@ new GLTFLoader().load("/models/meili.glb", (gltf) => {
   mixer = new THREE.AnimationMixer(model);
   for (const clip of gltf.animations) {
     const name = clip.name as AnimName;
-    if (["Idle", "Walk", "Run", "TPose"].includes(name)) {
-      actions.set(name, mixer.clipAction(clip));
+    if (STATE_KEYS_INV.has(name)) {
+      const action = mixer.clipAction(clip);
+      if (!LOOPING.has(name)) {
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true; // 定格在最后一帧等 finished 事件切回 idle
+      }
+      actions.set(name, action);
     }
   }
-  actions.get("Idle")?.play();
+  actions.get("idle_a")?.play();
+  // 一次性动作播完回常驻 idle
+  mixer.addEventListener("finished", () => play("idle_a"));
 
   model.traverse((o) => {
     // GLTFLoader 的 PropertyBinding.sanitizeNodeName 会删掉冒号等保留字符，
-    // 骨骼名 "mixamorig:Head" 加载后变成 "mixamorigHead"（2026-11-19 扭头失效根因）
-    if (!headBone && o instanceof THREE.Bone && ["mixamorig:Head", "mixamorigHead"].includes(o.name))
+    // 骨骼名 "mixamorig:Head" 加载后变成 "mixamorigHead"（2026-11-19 扭头失效根因）；
+    // meili 自有骨架（#16 阶段④）头骨就叫 "head"，骨表见 rig_meili.py BONES。
+    if (!headBone && o instanceof THREE.Bone &&
+        ["head", "mixamorig:Head", "mixamorigHead"].includes(o.name))
       headBone = o;
   });
   void commands.debugLog(`[gaze] headBone=${headBone?.name ?? "NOT FOUND"}`).catch(() => {});
@@ -263,6 +282,7 @@ const HOP_H = 0.35; // 跳跃高度（世界单位），从 0.22 加高——跳
 
 function wakeCue() {
   hopStart = performance.now();
+  play("jump"); // meili 原地产臂跳跃姿势 + 下方抛物线 = 完整跳跃
   bubbleUntil = performance.now() + 12000;
   lookAtUser(4000);
   playDing();
@@ -274,12 +294,11 @@ function wakeCue() {
 }
 
 // ---------- 表现层小动作（map.toml anim 字段；M1-6） ----------
-// 闭集消费：未知值忽略。占位模型动画表现力不足（见 wakeCue 注释），
-// v1 反应一律"跳跃 + 注视"——摸头（petted）等正式动画随 meili 形象（#16）。
+// 闭集消费：未知值忽略。值即 meili clip 名（#16 阶段④已入库），播完自动回 idle_a。
 const KNOWN_REACTIONS = new Set(["petted"]);
 function playReaction(anim: string) {
   if (!KNOWN_REACTIONS.has(anim)) return;
-  hopStart = performance.now();
+  play(anim as AnimName); // 摸头：歪头+耳抖（petted clip）
   lookAtUser(2500);
 }
 
@@ -388,7 +407,7 @@ function renderActive(now: number): boolean {
     now - hopStart < HOP_MS || // 跳跃进行中
     simOpen || // 模拟器面板开
     now - lastCursorActive < 2000 || // 光标最近在动
-    current !== "Idle" // Walk/Run 等非常驻动画
+    current !== "idle_a" // wave/jump 等非常驻动画
   );
 }
 

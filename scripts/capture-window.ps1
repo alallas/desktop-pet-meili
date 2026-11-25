@@ -1,24 +1,29 @@
-param([string]$Out = "D:\Repos\desktop-pet-meili\shot-printwindow.png")
-Add-Type -AssemblyName System.Drawing
-Add-Type @"
+param([IntPtr]$Handle, [string]$Out)
+$src = @"
 using System;
 using System.Runtime.InteropServices;
-public struct RECT { public int Left, Top, Right, Bottom; }
-public class PW {
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+public class PWC {
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+    public struct RECT { public int Left, Top, Right, Bottom; }
+    public struct POINT { public int X, Y; }
 }
 "@
-$h = (Get-Process chaojiandai).MainWindowHandle
-$r = New-Object RECT
-[PW]::GetWindowRect($h, [ref]$r) | Out-Null
-$w = $r.Right - $r.Left; $hh = $r.Bottom - $r.Top
-Write-Host "window ${w}x${hh} at $($r.Left),$($r.Top)"
-$bmp = New-Object System.Drawing.Bitmap $w, $hh
+Add-Type -TypeDefinition $src
+Add-Type -AssemblyName System.Drawing
+$cr = New-Object PWC+RECT
+[PWC]::GetClientRect($Handle, [ref]$cr) | Out-Null
+$pt = New-Object PWC+POINT
+[PWC]::ClientToScreen($Handle, [ref]$pt) | Out-Null
+$w = $cr.Right - $cr.Left; $h = $cr.Bottom - $cr.Top
+$bmp = New-Object System.Drawing.Bitmap($w, $h)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
-$dc = $g.GetHdc()
-$ok = [PW]::PrintWindow($h, $dc, 2)  # PW_RENDERFULLCONTENT
-$g.ReleaseHdc($dc)
-Write-Host "PrintWindow=$ok"
+$hdc = $g.GetHdc()
+# PW_RENDERFULLCONTENT=2 | PW_CLIENTONLY=1
+[PWC]::PrintWindow($Handle, $hdc, 3) | Out-Null
+$g.ReleaseHdc($hdc)
 $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
-Write-Host "saved $Out"
+$g.Dispose(); $bmp.Dispose()
+Write-Output "saved ${w}x${h} at ($($pt.X),$($pt.Y))"

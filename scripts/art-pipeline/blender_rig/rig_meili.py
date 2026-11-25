@@ -61,7 +61,7 @@ for name, head, tail, parent in BONES:
     eb = arm_data.edit_bones.new(name)
     eb.head = head
     eb.tail = tail
-    eb.use_deform = not name.startswith("root")  # root 纯控制，不参与蒙皮
+    eb.use_deform = True  # root 也导出（零权重不蒙皮），跳跃/坐下靠它带全身
     # 包络参数调大（Tripo 网格热权重必失败，走包络蒙皮）
     eb.envelope_distance = 0.14
     eb.envelope_weight = 1.0

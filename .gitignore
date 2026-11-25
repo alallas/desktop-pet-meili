@@ -19,3 +19,5 @@ tools/m2w64-winpthreads/
 # sqlite 预编译二进制（坑 25）
 tools/sqlite3/
 shot-*.png
+art/raw/
+shot.png

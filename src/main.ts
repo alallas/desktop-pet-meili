@@ -90,6 +90,12 @@ const petBasePos = new THREE.Vector3();
 new GLTFLoader().load("/models/meili.glb", (gltf) => {
   const model = gltf.scene;
 
+  // 朝向定案（2026-11-25 v2 网格）：探针确认脸朝 +X（Tripo multiview 惯例），
+  // 转 -90° 面向相机（+Z）。旋转必须在量 bbox 之前设置并 updateMatrixWorld，
+  // 否则旋转后包围盒错位、宠物偏出锚点。
+  model.rotation.y = -Math.PI / 2;
+  model.updateMatrixWorld(true);
+
   // 自动适配：统一缩放到 PET_HEIGHT、脚底贴锚点底、水平居中
   const box = new THREE.Box3().setFromObject(model);
   const size = box.getSize(new THREE.Vector3());
@@ -98,10 +104,6 @@ new GLTFLoader().load("/models/meili.glb", (gltf) => {
   model.scale.setScalar(scale);
   model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
   bboxInfo = `${size.x.toFixed(1)}x${size.y.toFixed(1)}x${size.z.toFixed(1)}`;
-  // 朝向定案（2026-11-25）：gltf-transform 链会保留 Tripo 节点的 -90°X 旋转，
-  // 世界空间脸朝 +Z（顶点探针 scripts/art-pipeline/glb_orient_probe.py 五向深度图确认），
-  // 与相机同向 = 面向用户，无需旋转。注意 v7 的面部特征（闭眼缝+单眉豆）很含蓄，
-  // 肉眼截图容易误判成后脑，以探针为准。species 配置化（M-a）时朝向进配置
   petAnchor.add(model);
   petModel = model;
   layoutPet();

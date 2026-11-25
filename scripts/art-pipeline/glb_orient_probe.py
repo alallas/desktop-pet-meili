@@ -98,8 +98,13 @@ def world_vertices(gltf, bin_):
 
 def depth_render(pts, axis, sign, res=256):
     """沿 axis(0=x,1=y,2=z) 方向看（sign=+1 从正轴看向原点），返回深度灰度图"""
-    keep = [i for i in range(3) if i != axis]
-    u, v = pts[:, keep[0]], pts[:, keep[1]]
+    if axis == 0:
+        # 侧视：屏幕横轴 = 模型 Z，屏幕纵轴 = 模型 Y（up）
+        u, v = pts[:, 2], pts[:, 1]
+    elif axis == 1:
+        u, v = pts[:, 0], pts[:, 2]
+    else:
+        u, v = pts[:, 0], pts[:, 1]
     d = pts[:, axis] * sign  # 越大越近
     umin, umax = u.min(), u.max()
     vmin, vmax = v.min(), v.max()

@@ -1,7 +1,11 @@
-# meili 物种档案（定种 · 待人工点A确认）
+# meili 物种档案（定种 · 人工点A 已确认 2026-11-25）
 
 > 依据：产品设计 §4.1、docs/美术生产线.md §3。
 > 本文件是全链"需求合同"：③④⑤ 阶段所有产出对照本文档验收。
+>
+> **概念定稿（人工点B 已确认 2026-11-25）**：基准图 `art/concept/meili_v7.png`；
+> 四视角+色卡 `art/concept/meili_sheet_views.png`；九宫格动作标尺
+> `art/concept/meili_sheet_actions.png`（新增 `special_angry` 生气叉腰，九格之九）。
 
 ## 是谁
 

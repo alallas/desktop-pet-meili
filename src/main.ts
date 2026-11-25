@@ -54,8 +54,9 @@ key.position.set(2, 4, 3);
 scene.add(key);
 
 // ---------- 模型 / 动画状态机 ----------
-// M1 测试模型：Soldier（three.js 示例，Mixamo 授权，占位用，正式形象为 3D 水獭 meili）。
-// 换它的原因：RobotExpressive 的 Idle 自带头部摇摆，掩盖倾听反馈动作（2026-11-19 用户要求）。
+// 当前模型：meili 水獭原型（#16 阶段③⑤：Tripo p2-quad 生成 → fbx2glb 转换 →
+// gltf-transform 标准化 14858 三角/无纹理）。尚无骨骼与动画（阶段④ 绑骨后解锁
+// 动作与视线）；Soldier（Mixamo 授权占位）留 public/models/Soldier.glb 可回退。
 type AnimName = "Idle" | "Walk" | "Run" | "TPose";
 const STATE_KEYS: Record<string, AnimName> = { "1": "Idle", "2": "Walk", "3": "Run", "4": "TPose" };
 
@@ -86,7 +87,7 @@ function layoutPet() {
 }
 const petBasePos = new THREE.Vector3();
 
-new GLTFLoader().load("/models/Soldier.glb", (gltf) => {
+new GLTFLoader().load("/models/meili.glb", (gltf) => {
   const model = gltf.scene;
 
   // 自动适配：统一缩放到 PET_HEIGHT、脚底贴锚点底、水平居中
@@ -97,8 +98,10 @@ new GLTFLoader().load("/models/Soldier.glb", (gltf) => {
   model.scale.setScalar(scale);
   model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
   bboxInfo = `${size.x.toFixed(1)}x${size.y.toFixed(1)}x${size.z.toFixed(1)}`;
-  // Mixamo 模型正面朝 +Z，与 RobotExpressive（-Z）相反，需转 180° 面向用户
-  model.rotation.y = Math.PI;
+  // 朝向定案（2026-11-25）：gltf-transform 链会保留 Tripo 节点的 -90°X 旋转，
+  // 世界空间脸朝 +Z（顶点探针 scripts/art-pipeline/glb_orient_probe.py 五向深度图确认），
+  // 与相机同向 = 面向用户，无需旋转。注意 v7 的面部特征（闭眼缝+单眉豆）很含蓄，
+  // 肉眼截图容易误判成后脑，以探针为准。species 配置化（M-a）时朝向进配置
   petAnchor.add(model);
   petModel = model;
   layoutPet();

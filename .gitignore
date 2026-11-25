@@ -4,6 +4,8 @@ src-tauri/target/
 src-tauri/gen/
 *.log
 models/
+# 桌宠网格终产物要随仓库分发（models/ 是忽略本地 LLM 权重，勿删此例外）
+!public/models/
 tools/
 
 # Python

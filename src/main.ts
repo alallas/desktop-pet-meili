@@ -479,7 +479,7 @@ async function refresh() {
   const pos = await win.outerPosition();
   const size = await win.outerSize();
   const info = [
-    `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}`,
+    `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}  build:animsim`,
     `窗口 ${size.width}×${size.height} @(${pos.x},${pos.y})  穿透:${clickThrough}`,
     `Ctrl+Alt+N 模拟器  |  T穿透 M监视 Q退出(需窗口聚焦)`,
   ];

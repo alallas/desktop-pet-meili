@@ -615,7 +615,7 @@ const SCENARIOS: { label: string; kind: string; payload: Value }[] = [
 
 const simPanel = document.createElement("div");
 simPanel.style.cssText =
-  "position:fixed;right:8px;top:8px;width:210px;display:none;padding:8px;" +
+  "position:fixed;right:8px;top:8px;width:238px;display:none;padding:8px;" +
   "background:rgba(20,24,32,.85);border:1px solid #4a9eff;border-radius:8px;z-index:100;" +
   "font:12px/1.5 sans-serif;color:#dde";
 document.body.appendChild(simPanel);
@@ -660,6 +660,103 @@ for (const s of SCENARIOS) {
       })
       .catch((err) => simLog(`异常: ${String(err)}`));
   };
+  simPanel.appendChild(btn);
+}
+
+// ---------- 动画 clip 测试区（#16 阶段④验收配套） ----------
+// 点按钮直触表现层（不过行为引擎），用于逐个 clip 目检姿态/循环/回 idle。
+// 与数字键的差异：① 同 clip 再点 = 重播（数字键 play() 对 current 同值直接 return）；
+// ② 勾选"单次循环"可把 LoopOnce 动作改成 LoopRepeat 反复观察动作全程。
+const animDivider = document.createElement("div");
+animDivider.textContent = "── 动画 clip 直测 ──";
+animDivider.style.cssText = "margin:8px 0 4px;color:#9fe8c0;font-weight:bold;border-top:1px solid #456;padding-top:6px";
+simPanel.appendChild(animDivider);
+
+let repeatOneShots = false;
+const repeatBox = document.createElement("input");
+repeatBox.type = "checkbox";
+repeatBox.id = "sim-repeat";
+repeatBox.onchange = () => {
+  repeatOneShots = repeatBox.checked;
+  // 立即对全部一次性 clip 生效；切回时恢复 LoopOnce + 定格
+  for (const [name, action] of actions) {
+    if (!LOOPING.has(name)) {
+      if (repeatOneShots) {
+        action.setLoop(THREE.LoopRepeat, Infinity);
+        action.clampWhenFinished = false;
+      } else {
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+      }
+    }
+  }
+  simLog(repeatOneShots ? "单次动作已改循环（观察模式）" : "已恢复单次播放");
+};
+const repeatLabel = document.createElement("label");
+repeatLabel.htmlFor = "sim-repeat";
+repeatLabel.textContent = " 单次动作循环（便于观察全程）";
+repeatLabel.style.cssText = "display:inline;margin:2px 0 4px;cursor:pointer;font-size:11px";
+simPanel.appendChild(repeatBox);
+simPanel.appendChild(repeatLabel);
+
+function testPlay(name: AnimName) {
+  const action = actions.get(name);
+  if (!action) {
+    simLog(`clip ${name} 未加载`);
+    return;
+  }
+  if (name === current) {
+    // 同 clip 重播：手动 reset，绕开 play() 的 current 早退
+    action.reset().fadeIn(0.1).play();
+    if (!LOOPING.has(name) && !repeatOneShots) {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    }
+  } else {
+    play(name);
+  }
+  // 循环 clip 保持循环；单次 clip 若在观察模式下也保持（onchange 已统一设置）
+  simLog(`▶ ${name}${LOOPING.has(name) ? "（循环）" : repeatOneShots ? "（循环·观察）" : "（单次→回 idle_a）"}`);
+}
+
+const clipGrid = document.createElement("div");
+clipGrid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:3px";
+simPanel.appendChild(clipGrid);
+
+const KEY_BY_ANIM: Record<string, string> = Object.fromEntries(
+  Object.entries(STATE_KEYS).map(([k, v]) => [v, k])
+);
+for (const name of Object.values(STATE_KEYS)) {
+  const btn = document.createElement("button");
+  btn.textContent = `${KEY_BY_ANIM[name]} ${name}`;
+  btn.style.cssText =
+    "padding:4px 6px;text-align:left;font-size:11px;" +
+    "background:#2a3a4d;color:#dde;border:1px solid #456;border-radius:5px;cursor:pointer";
+  btn.onmouseenter = () => (btn.style.background = "#3a4f68");
+  btn.onmouseleave = () => (btn.style.background = "#2a3a4d");
+  btn.onclick = () => testPlay(name);
+  clipGrid.appendChild(btn);
+}
+
+// 交互组合按钮：走真实反馈函数（含气泡/叮/注视/抛物线），验收"被喊到"完整效果
+const cueDivider = document.createElement("div");
+cueDivider.textContent = "── 交互反馈 ──";
+cueDivider.style.cssText = "margin:8px 0 4px;color:#9fe8c0;font-weight:bold;border-top:1px solid #456;padding-top:6px";
+simPanel.appendChild(cueDivider);
+
+const CUE_BUTTONS: { label: string; fn: () => void }[] = [
+  { label: "🔔 唤醒反馈（跳+气泡+叮）", fn: () => { wakeCue(); simLog("🔔 唤醒反馈"); } },
+  { label: "✋ 摸头反应（petted+注视）", fn: () => { playReaction("petted"); simLog("✋ 摸头反应"); } },
+];
+for (const c of CUE_BUTTONS) {
+  const btn = document.createElement("button");
+  btn.textContent = c.label;
+  btn.style.cssText =
+    "display:block;width:100%;margin:3px 0;padding:5px 8px;text-align:left;" +
+    "background:#2d4a3a;color:#dfd;border:1px solid #465;border-radius:5px;cursor:pointer";
+  btn.onmouseenter = () => (btn.style.background = "#3a5f48");
+  btn.onmouseleave = () => (btn.style.background = "#2d4a3a");
+  btn.onclick = c.fn;
   simPanel.appendChild(btn);
 }
 

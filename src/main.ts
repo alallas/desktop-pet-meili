@@ -122,12 +122,10 @@ new GLTFLoader().load("/models/meili.glb", (gltf) => {
   mixer = new THREE.AnimationMixer(model);
   for (const clip of gltf.animations) {
     const name = clip.name as AnimName;
-    if (STATE_KEYS_INV.has(name)) {
+    // 阶段④重做期（2026-11-26 判决，坑 64-65）：9 个 clip 导出数据损坏全部禁用，
+    // 只留 idle_a 保底；新资产过数值验收后恢复（每 clip 独立导出+独立校验的新管线）
+    if (name === "idle_a") {
       const action = mixer.clipAction(clip);
-      if (!LOOPING.has(name)) {
-        action.setLoop(THREE.LoopOnce, 1);
-        action.clampWhenFinished = true; // 定格在最后一帧等 finished 事件切回 idle
-      }
       actions.set(name, action);
     }
   }
@@ -479,7 +477,7 @@ async function refresh() {
   const pos = await win.outerPosition();
   const size = await win.outerSize();
   const info = [
-    `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}  build:animsim`,
+    `FPS ${fps}  三角形 ${renderer.info.render.triangles}  ${bboxInfo}  build:meili-rebuild`,
     `窗口 ${size.width}×${size.height} @(${pos.x},${pos.y})  穿透:${clickThrough}`,
     `Ctrl+Alt+N 模拟器  |  T穿透 M监视 Q退出(需窗口聚焦)`,
   ];

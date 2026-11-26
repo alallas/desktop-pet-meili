@@ -616,6 +616,7 @@ const SCENARIOS: { label: string; kind: string; payload: Value }[] = [
 const simPanel = document.createElement("div");
 simPanel.style.cssText =
   "position:fixed;right:8px;top:8px;width:238px;display:none;padding:8px;" +
+  "max-height:calc(100vh - 24px);overflow-y:auto;" + // 窗高 460 装不下全部门控，必须可滚
   "background:rgba(20,24,32,.85);border:1px solid #4a9eff;border-radius:8px;z-index:100;" +
   "font:12px/1.5 sans-serif;color:#dde";
 document.body.appendChild(simPanel);
